@@ -1,0 +1,493 @@
+* Misceláneas
+** Preparar para ejecutar slurm
+#+NAME: slurm-setup
+#+BEGIN_SRC sh :noweb yes :results output :exports none :tangle ../shell/slurm-setup.sh :dir /ssh:jdiaz@192.168.26.3:/home/jdiaz/
+sbatch 
+#+END_SRC
+#+NAME: slurm-setup-test
+#+BEGIN_SRC sh :noweb yes :results output :exports none :tangle ../shell/slurm-setup.sh :dir /ssh:jdiaz@192.168.26.3:/home/jdiaz/
+#!/bin/bash
+#SBATCH --job-name=jdiaz-test4​ #nombre para identificar el trabajo. Por defecto es el nombre ​​del ​​script
+#SBATCH​​ --ntasks=1 # cantidad de cores pedidos
+#SBATCH --tasks-per-node=1​ # cantidad de cores por nodo, para que distribuya entre varios nodos
+#SBATCH --output=trabajo-%j-salida.txt​# la salida y errore standar van a este archivo. Si no es especificado es slurm-%j.out (donde​​%j​​es​​el​​Job​​ID)
+#SBATCH --error=trabajo-%j-error.txt​#siseespecifica,lasalidadeerrorvaporseparadoaeste​​archivo#
+#SBATCH --cpus-per-task=1 #por cada tarea solicita C cores,utilizando en total C*Ncores. Es útil paracódigo híbrido MPI+OpenMP:lanza N procesos MPI reservando C cores para cada una.
+#SBATCH --ntasks-per-node= 1 #asigna a lo sumo TPN tareas por nodo hasta completar las ntasks, sin ocupar el resto de cores del nodo. Por ejemplo,siN=20yTPN=10seocuparán​​10​​cores​​en​​2​​nodos
+#SBATCH --nodes=1 # solicita P nodos completos. Tener en cuenta lanzar la cantidad adecuada de procesos para que el nodo no quede subtulizado.
+#SBATCH --mem-per-cpu=M​ # asigna M  megabytes de memoria por cada ntask. Si no se especifica, por defecto es 6440MB(aprox6.3GB). Tener en cuenta que la tarea será cancelada si excede la cantidad solicitada.
+#SBATCH --output=trabajo-%j.salida.txt​​​#​​redirige la salida del script al archivo​​especificado.
+#SBATCH --error=trabajo-%j.error.txt # redirige la salida de error del script al archivo especificado.
+#SBATCH --mail-user=jdiaz@ingenieria.uner.edu.ar # envía un correo cuando el trabajo finaliza correctamente o por algún error
+octave octave-test-code.m
+#+END_SRC
+
+#+RESULTS: slurm-setup
+#+begin_example
+GNU Octave, version 3.8.2
+Copyright (C) 2014 John W. Eaton and others.
+This is free software; see the source code for copying conditions.
+There is ABSOLUTELY NO WARRANTY; not even for MERCHANTABILITY or
+FITNESS FOR A PARTICULAR PURPOSE.  For details, type 'warranty'.
+
+Octave was configured for "x86_64-redhat-linux-gnu".
+
+Additional information about Octave is available at http://www.octave.org.
+
+Please contribute if you find this software useful.
+For more information, visit http://www.octave.org/get-involved.html
+
+Read http://www.octave.org/bugs.html to learn how to submit bug reports.
+For information about changes from previous versions, type 'news'.
+
+Elapsed time is 6.25418 seconds.
+#+end_example
+
+#+NAME: octave-test-code
+#+BEGIN_SRC octave :results output 
+tic;
+A=rand(6000);
+B=rand(6000);
+C=A*B;
+toc
+#+END_SRC
+
+#+RESULTS: octave-test-code
+: Elapsed time is 5.01487 seconds.
+
+** Ejecutar scritp de octave :noexport:
+   Para ejecutar un script octave sin que quede dependiendo de la terminal. Genera un archivo con la salida normal y otro en caso de error.
+#+NAME: run-octave-instances
+#+BEGIN_SRC sh :exports none :tangle ../shell/run-octave-instances.sh
+#!/bin/sh -f
+FILE=$1
+OFILE=`echo $FILE | sed 's/.$//' | sed 's/.$//'`"-output.txt"
+EFILE=`echo $FILE | sed 's/.$//' | sed 's/.$//'`"-error.txt"
+echo "Running -> " $FILE
+echo "Octave Output -> " $OFILE 
+echo "Octave Error -> " $EFILE 
+nohup octave -q $FILE > $OFILE 2> $EFILE &
+echo "Command Started"
+#+END_SRC
+
+#+BEGIN_SRC octave :results output :exports none
+  mat1=rand(2000);
+  mat2=randn(2000);
+  tic;mat3=mat1*mat2;toc
+#+END_SRC
+
+#+RESULTS:
+: Elapsed time is 5.62615 seconds.
+: 
+
+** Script para ejecutar lista de comandos desde archivo
+   Este scritp toma una lista de comandos a ejecutar desde un archivo. Calcular el número de núcleos repsentes para utilizar por cada linea del archivo. Si hay más comandos a ejecutar que núcleos, el script administra una cola de procesos, a la espera que los procesos finalicen para luego ejecutar las tareas pendientes. Utiliza nice para ejecutar los comandos de forma que el sistema no quede tildado hasta finalizar las tareas. Modificado de este [[http://pebblesinthesand.wordpress.com/2008/05/22/a-srcipt-for-running-processes-in-parallel-in-bash/][sitio]].
+
+#+BEGIN_SRC sh :exports none :tangle ../shell/parallel.sh
+    #!/bin/sh
+    NC=`nproc`
+    NCORES=$NC
+    filename=$1
+    NPROC=0
+    MAX_NPROC=$NC
+    NUM=0
+    function queue {
+        QUEUE="$QUEUE $1"
+        NUM=$(($NUM+1))
+    }
+    
+    function regeneratequeue {
+        OLDREQUEUE=$QUEUE
+        QUEUE=""
+        NUM=0
+        for PID in $OLDREQUEUE
+        do
+            if [ -d /proc/$PID  ] ; then
+                QUEUE="$QUEUE $PID"
+                NUM=$(($NUM+1))
+            else
+                echo "PID: $PID finished"
+            fi
+        done
+    }
+    
+    function checkqueue {
+        OLDCHQUEUE=$QUEUE
+        for PID in $OLDCHQUEUE
+        do
+            if [ ! -d /proc/$PID ] ; then
+                regeneratequeue # at least one PID has finished
+                break
+            fi
+        done
+    }
+    
+    while read line; do 
+    ## be nice and reduce priority
+        eval nice $line &
+        PID=$!
+        echo "Running $line in PID: $PID"
+        queue $PID
+        while [ $NUM -ge $MAX_NPROC ]; do
+            checkqueue
+            sleep 1
+        done
+    done < $filename
+    while [ $NUM -ne 0 ];do
+        checkqueue
+        sleep 1
+    done
+    echo "The process of the file $filename has finished"
+#+END_SRC
+
+** Lectura de archivo TIFF 16 bits entero sin signo en octave
+
+#+NAME: read-my-tiff-function
+#+BEGIN_SRC octave :exports none :tangle ../octave/miscellaneous/read_my_tiff.m
+  function data = read_my_tiff(filename,n_images=1)
+  ## usage: data = read_my_tiff(filename,n_images=1)
+  ## function for reading 16bits uncompressed grayscale tiff images
+  ## generated by SUMDD software or ImageJ1.46. It could not work in other tiff.
+    warning off; 
+    IMAGE_WIDTH=256;
+    IMAGE_LENGTH=257;
+    BITS_PER_SAMPLE=258;
+    COMPRESSION=259;
+    PHOTOMETRIC_INTERPRETATION=262;
+    STRIP_OFFSETS=273;
+    ROWS_PER_STRIP=278;
+    STRIP_BYTE_COUNTS=279;
+    X_RESOLUTION=282;
+    Y_RESOLUTION=283;
+    RESOLUTION_UNIT=296;
+  
+    fid = fopen (filename, "r");
+    if (is_valid_file_id(fid))
+      T = dec2hex(fread (fid,1,"uint16",0,"ieee-le"));
+      if (T=="4949")
+        TIFF_BYTE_ORDER="ieee-le";
+      else 
+        if (T=="4D4D")
+          TIFF_BYTE_ORDER="ieee-be";
+        endif
+      endif
+      TIFF_FILE_IDENTIFIER=fread (fid,1,"uint16",0,TIFF_BYTE_ORDER);
+      if (TIFF_FILE_IDENTIFIER==42)
+        [n_cols aux]=tiff_tag_read(filename,IMAGE_LENGTH);
+        [n_rows aux]=tiff_tag_read(filename,IMAGE_WIDTH);
+        data=zeros(n_rows,n_cols,length(n_images));
+        for j=1:length(n_images)
+          [data_offset aux]=tiff_tag_read(filename,STRIP_OFFSETS,n_images(j));
+          if (data_offset!=0)
+            fseek(fid,data_offset,SEEK_SET);
+            [data(:,:,j) counts]=fread(fid,[n_rows n_cols],"uint16",0,TIFF_BYTE_ORDER);
+          else 
+            disp(strcat("there is no ", num2str(j), " IFD in tiff image."));
+          endif
+        endfor
+      endif
+    endif
+    fclose (fid);
+  endfunction
+#+END_SRC
+** nextpow2n (nextpow2 vectorizado) en octave
+#+NAME: nextpow2n
+#+BEGIN_SRC octave :exports none :tangle ../octave/miscellaneous/nextpow2n.m
+  function NEWV = nextpow2n(V)
+    ## usage: NEWV = nextpow2n(V)
+    ## This function is vectorized version of nextpow2n.
+    if (isvector(V))
+      L=length(V);
+      NEWV=zeros(size(V));
+      for j=1:L
+        NEWV(j)=nextpow2(V(j));
+      endfor
+    endif
+  endfunction
+#+END_SRC
+
+#+RESULTS: nextpow2n
+
+#+NAME: nextpow2n-test
+#+BEGIN_SRC octave :exports none :results output :exports none 
+  addpath(genpath("../octave"))
+  a=ones(3,2,2,5);
+  size_a=size(a);
+  nextpow2n(size_a)
+#+END_SRC
+
+#+RESULTS: nextpow2n-test
+: ans =
+: 
+:    2   1   1   3
+: 
+
+** I-Divergence en octave
+#+NAME: i_divergence_function
+#+BEGIN_SRC octave :exports none :tangle ../octave/miscellaneous/i_divergence.m :noweb yes :padline no
+  function IDIV=i_divergence(MODEL,DATA)
+    <<octave-license-dz>>
+    ## usage:  IDIV=i_divergence(MODEL,DATA)
+    IDIV=sum((MODEL(:).*log(MODEL(:)./DATA(:)))-MODEL(:)+DATA(:));
+  endfunction
+#+END_SRC
+
+** Función log(x!) en octave
+  Se aproxima la función log(x!) para valores grandes de x
+#+NAME: log_factorial_function
+#+BEGIN_SRC octave :exports none :tangle ../octave/miscellaneous/log_factorial.m :noweb yes :padline no
+  function log_fact=log_factorial(n)
+    <<octave-license-dz>>
+    ## usage: log_fact=log_factorial(n)
+    N=max(n(:));
+    if (N==0)
+    log_fact=log(1);
+    else
+    log_fact=zeros(size(n));
+    data=1:N;
+    for j=1:length(n(:))
+      log_fact(j)=sum(log(data(1:n(j))));
+    endfor
+    endif
+  endfunction
+#+END_SRC
+** Función de verosimilitud para distribucion poisson en octave
+#+NAME: poiss_log_likelihood_function
+#+BEGIN_SRC octave :exports none :tangle ../octave/miscellaneous/poiss_log_likelihood.m :noweb yes :padline no
+  function L=poiss_log_likelihood(MODEL,DATA)
+    <<octave-license-dz>>
+    ## usage: poiss_log_likelihood(MODEL,DATA)
+    log_fact_data=log_factorial(DATA);
+    L=sum(DATA(:).*log(MODEL(:))-log_fact_data(:)-MODEL(:));
+  endfunction
+#+END_SRC
+
+** Transformación de Anscombe
+#+NAME: anscombe-transformation
+#+BEGIN_SRC octave :exports none :tangle ../octave/miscellaneous/vst.m :noweb yes :padline no
+  function AT=vst(DATA)
+    <<octave-license-dz>>
+    ## usage: vst(DATA)
+    ## Variance Stabilization Transformation. Anscombe Transformation
+    AT=2*sqrt(DATA+3/8); 
+  endfunction
+#+END_SRC
+
+** Newton-Raphson method :noexport:
+#+NAME: nr_method
+#+BEGIN_SRC octave :results none :exports none :tangle ../octave/miscellaneous/nr_method.m
+  function [X iteration x_error] = nr_method(F,FPRIME,X0,TOL=10e-3,MAX_ITER=20)
+      iteration=1;
+      x_error=inf;
+      XOLD=X0;
+      while ((iteration<MAX_ITER)&&(x_error>TOL))
+        X=XOLD-F(XOLD)/FPRIME(XOLD);
+        x_error=abs(X-XOLD);
+        XOLD=X;
+        iteration+=1;
+      endwhile
+  endfunction
+#+END_SRC
+
+#+NAME: nr_method_test
+#+BEGIN_SRC octave :exports none g:results output :exports none
+  addpath(genpath("../octave"));
+  fx=@(X)sin(X);
+  fprime_theo=@(X)cos(X);
+  fprime_num=@(X)dfx(fx,X,0);
+  x_ini=2.8;
+  tol=1e-3;
+  format("long");
+  pi
+  [x iters err]= nr_method(fx,fprime_theo,x_ini,tol)
+  [x iters err]= nr_method(fx,fprime_num,x_ini,tol)
+
+#+END_SRC
+
+#+RESULTS: nr_method_test
+: ans =  3.14159265358979
+: x =  3.14159265358979
+: iters =  4
+: err =    9.02478856978917e-07
+: x =  3.14159265358994
+: iters =  4
+: err =    9.04813544533312e-07
+
+** Diferencia finata de 1er orden
+#+NAME: dfx_function
+#+BEGIN_SRC octave :exports none :tangle ../octave/miscellaneous/dfx.m :noweb yes
+function D=dfx(F,X,APROX,H=0.001)
+<<octave-license-dz>>
+
+## usage: D=dfx(F,X,APROX,H=0.001)
+## APROX -1, 0 or 1 for backward, central and forward difference
+   if (APROX>0)
+      D=(F(X+H)-F(X))./H;
+    elseif (APROX==0)
+      D=(F(X+H)-F(X-H))./(2*H);
+    else
+      D=(F(X)-F(X-H))./H;
+    endif
+  endfunction
+#+END_SRC
+** Diferencia finita de 2do orden
+#+NAME: df2dx2_function
+#+BEGIN_SRC octave :exports none :tangle ../octave/miscellaneous/df2x2.m :noweb yes
+  function D=df2x2(F,X,APROX,H=0.001)
+    <<octave-license-dz>>
+    ## usage: D=df2x2(F,X,APROX,H=0.001)
+    if (APROX>0)
+      D=(F(X+2*H)-2*F(X+H)+F(X))/H.^2;
+    elseif (APROX==0)
+      D=(F(X+H)-2*F(X)+F(X-H))/H.^2;
+    else
+      D=(F(X)-2*F(X-H)+F(X-2*H))/H.^2;
+    endif
+  endfunction
+
+#+END_SRC
+** Convertir datos a frecuencia
+#+NAME: convert_to_pmf
+#+BEGIN_SRC octave :exports none :tangle ../octave/miscellaneous/convert_to_pmf.m :noweb yes
+  function PMF=convert_to_pmf(MODEL,PARAMETERS)
+    <<octave-license-dz>>
+    ## converts a model to be valued with PARAMETERS in an approximation
+    ## of a probability mass function
+    PMF=MODEL(PARAMETERS)./sum(MODEL(PARAMETERS)(:));
+  endfunction
+
+#+END_SRC
+** Dibujar una flecha 
+   Dibuja una flecha con líneas. Devuelve los handles a los tres elementos para poder cambiar color y tipo de linea con "set".
+#+BEGIN_SRC octave :exports none :tangle ../octave/miscellaneous/drawArrow.m :noweb yes
+  function [hml hw1 hw2]= drawArrow(X1,Y1,X2,Y2,L,W)
+    <<octave-license-dz>>
+    ## usage: [hml hw1 hw2]= drawArrow(X1,Y1,X2,Y2,L,W)
+    alpha=acos((X2-X1)/sqrt((X2-X1)^2+(Y2-Y1)^2));
+    salpha=sin(alpha);
+    calpha=cos(alpha);
+    xt2=-W/2*salpha-L*calpha+X2;
+    yt2=W/2*calpha-L*salpha+Y2;
+    xt3=-(-W/2*salpha)-L*calpha+X2;
+    yt3=-W/2*calpha-L*salpha+Y2;
+    hml=line([X1 X2],[Y1 Y2]);
+    hw1=line([xt2 X2],[yt2 Y2]);
+    hw2=line([xt3 X2],[yt3 Y2]);      
+  endfunction
+#+END_SRC
+
+** Producto de señales con diferente muestreo
+
+   Producto de señales con diferentes muestreos. Este caso aparece en la obtención del espectro final de una sustancia fluorescente que atraviesa un conjunto de filtros. Los datos de los espectros en esta aplicación tienen diferentes escalas, número de muestras y frecuencia de muestreos. Se utiliza una interp1 por defecto lineal para resolver el caso del producto de dos señales. El soporte de la señal resultante  debe ser menor o igual que el soporte más pequeño de las señales de entrada.
+
+#+BEGIN_SRC octave :results none :exports none :tangle ../octave/miscellaneous/non_uniform_prod.m :noweb yes
+function SPROD = non_uniform_prod(X1,S1,X2,S2,XI,INTERP="linear")
+<<octave-license-dz>>
+## usage: SPROD = non_uniform_prod(X1,S1,X2,S2,XI)
+  if ( ((X1(1)<=XI(1)) && (X1(end)>=XI(end))) && ((X2(1)<=XI(1)) && (X2(end)>=XI(end))) )
+  new_S1=interp1(X1,S1,XI,INTERP);
+  new_S2=interp1(X2,S2,XI,INTERP);
+  SPROD=new_S1.*new_S2;
+  endif
+endfunction
+
+#+END_SRC
+
+** FWHM para caso asimétrico
+#+BEGIN_SRC octave :results none :exports none :tangle ../octave/miscellaneous/afwhm.m :noweb yes
+  function [X_inf X_sup fw] = afwhm(DATA,X)
+    <<octave-license-dz>>
+    ## usage: [X_inf X_sup fw] = afwhm(DATA,X)
+    HM = max(DATA)/2;
+    data_aux = DATA-HM;
+    inds=find(data_aux>=0);
+    ind_inf_2=inds(1);
+    ind_sup_1=inds(length(inds));
+    if (ind_inf_2>1) 
+      ind_inf_1=ind_inf_2-1;
+      data_inf_1=DATA(ind_inf_1);
+      data_inf_2=DATA(ind_inf_2);
+      X_inf=interp1([data_inf_1 data_inf_2],[X(ind_inf_1) X(ind_inf_2)],HM,"linear");
+    else
+      X_inf=X(ind_inf_2);
+    endif
+    if (ind_sup_1<length(X)) 
+      ind_sup_2=ind_sup_1+1;
+      data_sup_1=DATA(ind_sup_1);
+      data_sup_2=DATA(ind_sup_2);
+      X_sup=interp1([data_sup_1 data_sup_2],[X(ind_sup_1) X(ind_sup_2)],HM,"linear");
+    else
+      X_sup=X(ind_sup_2);
+    endif
+    fw=abs(X_sup-X_inf);
+  endfunction
+#+END_SRC
+** Lectura de etiquetas en encabezado TIFF
+*** Versión C++
+#+BEGIN_SRC c++ :exports none :tangle ../c++/readtifftag.cpp
+#include <cstdlib>
+#include <fstream>
+#include <iostream>
+#include <string>
+
+using namespace std;
+
+void ReadTiffTAGs(string FileName);
+
+int main(int argc, char *argv[])
+{
+    string s;
+    unsigned short dato=255,dato2;
+    dato2 = dato<<8;
+    cout<< hex<<dato2<<endl;
+    cout<< "Ingrese el Nombre del archivo: "<<endl;
+    cin>>s;
+    ReadTiffTAGs(s);
+    return 0;
+}
+void ReadTiffTAGs(string FileName)
+{
+    ifstream ArchiFoto;
+    char TNByteOrder[3]="  ",Tag; // Tag name: byte order
+    unsigned short ArbtNumber, counter, DirNumber, Aux,ImWidth,ImLength; // Número identificador
+    unsigned int OffSet,AuxInt;
+    ArchiFoto.open(FileName.c_str(),ios::binary|ios::beg); // abro el archivo en modo binario
+
+    if (ArchiFoto.fail() )
+    {cout<< "no se pudo abrir el archivo"<<endl;
+        system("PAUSE");
+     exit(1);}
+    cout<<sizeof(TNByteOrder[0])<<endl;
+    ArchiFoto.read(TNByteOrder,2*(sizeof(TNByteOrder[0]))); // leo los dos primeros bytes
+    cout<<"Byte Order: "<< TNByteOrder <<endl;
+    ArchiFoto.read(reinterpret_cast<char*>(&ArbtNumber),sizeof(ArbtNumber));
+    cout<<"Indentificador: "<<dec<<ArbtNumber <<endl; // (42) indentifica al archivo como formato TIF
+    ArchiFoto.read(reinterpret_cast<char*>(&OffSet),(sizeof(OffSet)));
+    cout<<"Offset: "<< hex << (OffSet>>24) <<endl;
+    ArchiFoto.seekg(OffSet); //
+
+    ArchiFoto.read(reinterpret_cast<char*>(&DirNumber),(sizeof(DirNumber)));
+    cout<<"Numero de directorios: "<< dec << DirNumber <<endl;
+
+    counter=1;
+    while ((counter <= DirNumber))
+    {
+    ArchiFoto.read(reinterpret_cast<char*>(&Aux),(sizeof(Aux)));
+    cout<<"TAG"<<counter<<":"<< hex <<Aux <<"  ";
+
+    ArchiFoto.read(reinterpret_cast<char*>(&Aux),(sizeof(Aux)));
+    cout<<"Tipo: "<< dec <<Aux <<" ";
+
+    ArchiFoto.read(reinterpret_cast<char*>(&AuxInt),(sizeof(AuxInt)));
+    cout<<"Count: "<< dec <<AuxInt <<" ";
+
+    ArchiFoto.read(reinterpret_cast<char*>(&Aux),(sizeof(Aux)));
+    cout<<"Valor o off-set: "<< dec <<Aux <<endl;
+
+    ArchiFoto.seekg(2,ios::cur);
+
+    counter++;
+    }
+    ArchiFoto.close();
+ }
+ #+END_SRC

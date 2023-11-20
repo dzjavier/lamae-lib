@@ -1,0 +1,614 @@
+* Formación de imágenes
+** Convolución N-dimensional 
+   Formación de imágenes N-dimensionales con PSF estacionaria.
+#+NAME: stationary_imaging
+#+BEGIN_SRC octave :padline no :exports none :tangle ../octave/models/imaging/stationary_imaging.m
+function  IMAGE = stationary_imaging(OBJECT, PSF)
+    ## usage: IMAGE = stationary_imaging(OBJECT, PSF)
+    ## OBJECT is the specimen. 
+    ## PSF is the point spread function of the microscope
+    ## 
+    ## Notes: 
+    ## - For 1D objects, its non-singleton dimension must match 
+    ## with the non-singleton dimension of the PSF (e.g. if 
+    ## size(object) is 1xN, then size(PSF) must be 1xN).
+    ## - The sum(PSF(:)) should be 1. 
+
+    ## Author: Mauricio Tanus Mafud
+    ## Maintainer: Javier Eduardo Diaz Zamboni
+    ## Created: 2015/10/15
+    ## Revision: 2016/05/31
+    ## Version: 0.2
+    
+    object_dims = size(OBJECT);
+    new_object_dims = 2.^nextpow2n(object_dims);
+    padded_object = resize(OBJECT,new_object_dims);
+    transf_object = fftn(padded_object);
+    OTF = fftn(PSF,new_object_dims);
+    transf_image = transf_object.*abs(OTF);
+    space_image = abs(ifftn(transf_image)); 
+    IMAGE = resize(space_image,object_dims);
+
+    IMAGE(IMAGE<0) = 0;
+
+  endfunction
+
+#+END_SRC
+
+** Seccionamiento óptico
+   Formación de una imagen por seccionamiento óptico. La idea es aproximarse a la captura de una imagen por seccionamiento óptico considerando una PSF variante en la profundidad. 
+
+#+NAME: optical-section-imaging
+#+BEGIN_SRC octave :padline no :exports none :tangle ../octave/models/imaging/optical_section_imaging.m
+  function  IMAGE = optical_section_imaging(OBJECT, PSF)
+      ## usage: IMAGE = optical_section_imaging(OBJECT, PSF)
+      ## OBJECT is the specimen. 
+      ## PSF is the point spread function of the microscope. 
+      ## 
+      ## Notes: 
+      ## 
+      ## Author: Javier Eduardo Diaz Zamboni
+      ## Created: 2017/04/24
+      ## Version: 0.1
+    
+      object_dims = size(OBJECT);
+      psf_dims = size(PSF);
+      new_object_dims = [2.^nextpow2n(object_dims(1)) 2.^nextpow2n(object_dims(2)) object_dims(3)];
+      padded_object = resize(OBJECT,new_object_dims);
+      transf_object = fft2(padded_object);
+     
+      OTF = fft2(PSF,new_object_dims(1),new_object_dims(2));
+     
+      transf_image = transf_object.*abs(OTF);
+      space_image = sum(abs(ifft2(transf_image)),3); 
+      IMAGE = resize(space_image,object_dims(1),object_dims(2));
+      IMAGE(IMAGE<0) = 0;
+    endfunction
+
+#+END_SRC
+
+#+NAME: optical-sectioning
+#+BEGIN_SRC octave :padline no :exports none :tangle ../octave/models/imaging/optical_sectioning.m
+  function  IMAGE = optical_sectioning(OBJECT,PSF)
+    ## usage: IMAGE = optical_section_imaging(OBJECT, PSF)
+    ## OBJECT is the specimen. 
+    ## PSF is the point spread function of the microscope. 
+    ## Notes: 
+    ## 
+    ## Author: Javier Eduardo Diaz Zamboni
+    ## Created: 2017/05/12
+    ## Version: 0.1
+    ## psf{1}=PSF(T_S(1),PEAK_SHIFT(1));
+    psf_size=size(PSF{1});
+    obj_size=size(OBJECT);
+    padded_object=padarray(OBJECT,[0 0 fix(psf_size(3)/2)]);     
+    IMAGE=zeros(size(padded_object));
+##    for k=2:length(PEAK_SHIFT)
+##      psf{k}=PSF(T_S(k),PEAK_SHIFT(k));
+##    endfor
+    t_s_iter=1;
+    for k=fix(psf_size(3)/2)+1:obj_size(3)+fix(psf_size(3)/2)
+      IMAGE(:,:,k)=optical_section_imaging(padded_object(:,:,k-fix(psf_size(3)/2):k+fix(psf_size(3)/2)),PSF{t_s_iter});
+      t_s_iter+=1;
+    endfor
+    IMAGE=IMAGE(:,:,fix(psf_size(3)/2)+1:fix(psf_size(3)/2)+obj_size(3));
+  endfunction
+
+#+END_SRC
+
+#+NAME: deproject-optical-section
+#+BEGIN_SRC octave :padline no :exports none :tangle ../octave/models/imaging/deproject_optical_section.m
+function  IMAGE3D = deproject_optical_section(IMAGE2D, PSF)
+    image3d_dims = [size(IMAGE2D)(1) size(IMAGE2D)(2) size(PSF)(3)];
+    psf_dims = size(PSF);
+    PSF/=sum(PSF(:));
+    new_object_dims = [2.^nextpow2n(image3d_dims(1)) 2.^nextpow2n(image3d_dims(2)) image3d_dims(3)];
+    padded_object = resize(IMAGE2D,[new_object_dims(1) new_object_dims(2)]);
+    transf_object = fft2(padded_object);
+    OTF = fft2(PSF,[new_object_dims(1) new_object_dims(2)]);
+    transf_image = transf_object.*abs(OTF);
+    IMAGE3D = abs(ifft2(transf_image)); 
+    IMAGE3D = resize(IMAGE3D,image3d_dims(1),image3d_dims(2),image3d_dims(3));
+  endfunction
+#+END_SRC
+*** seccionamiento óptico con exitación de plano selectivo
+
+#+NAME: optical-sectioning-lsfm
+#+BEGIN_SRC octave :padline no :exports none :tangle ../octave/models/imaging/optical_sectioning_lsfm.m
+  function  IMAGE = optical_sectioning_lsfm(OBJECT,PSF,EP)
+    ## usage: IMAGE = optical_sectioning_lsmf(OBJECT, PSF,EP)
+    ## OBJECT is the specimen. 
+    ## PSF is the point spread function of the microscope. 
+    ## EP is the excitation profile
+    ## Notes: 
+    ## 
+    ## Author: Javier Eduardo Diaz Zamboni
+    ## Created: 2017/11/14
+    ## Version: 0.1
+    warning off;
+    if (iscell(PSF))
+    psf_size=size(PSF{1})
+    else  psf_size=size(PSF);
+    endif
+
+    obj_size=size(OBJECT);
+    ep_size=size(EP);
+    padded_object=padarray(OBJECT,[0 0 fix(psf_size(3)/2)]);     
+    IMAGE=zeros(size(padded_object));
+    t_s_iter=1;
+    for k=fix(psf_size(3)/2)+1:obj_size(3)+fix(psf_size(3)/2)
+      aux_obj=zeros(size(padded_object));
+      aux_obj(:,:,k-fix(ep_size(3)/2):k+fix(ep_size(3)/2))=padded_object(:,:,k-fix(ep_size(3)/2):k+fix(ep_size(3)/2)).*EP;
+      ## revisar esto
+      if (iscell(PSF))
+      psf_aux=PSF{t_s_iter};
+      else  psf_aux=PSF;
+      endif
+
+      ##
+      IMAGE(:,:,k)=optical_section_imaging(aux_obj(:,:,k-fix(psf_size(3)/2):k+fix(psf_size(3)/2)),psf_aux);
+      t_s_iter+=1;
+    endfor
+    IMAGE=IMAGE(:,:,fix(psf_size(3)/2)+1:fix(psf_size(3)/2)+obj_size(3));
+    warning on;
+  endfunction
+
+#+END_SRC
+
+*** prueba de formación de imágenes
+#+NAME: sagittal-data-generation
+#+BEGIN_SRC octave :noweb yes :exports none :tangle ../octave/models/imaging/sagittal_data_generation.m
+  clear all;
+  more off;
+  <<gl-model-setup>>
+  m.n_col=1;
+  m.n_row=31;
+  m.n_lay=41;
+  m.pixel_size=3.63;
+  m.delta_z=0.4;
+  peak_shift=0;
+  t_s=0;
+  <<gl-model-scales-setup>>
+  <<gl-model-functions-setup>>
+
+
+  m.peak_formation = @(T_S,PS=0)generate_image_stack(@(XX,YY,ZZ)m.gl_psf_punctual(XX,YY,ZZ,T_S),m.pixel_size,...
+                                                                m.pixel_size,m.delta_z,1,1,1,"none",PS);
+
+  m.image_formation = @(T_S,PS=0)generate_image_stack(@(XX,YY,ZZ)m.gl_psf_punctual(XX,YY,ZZ,T_S),...
+                				 m.pixel_size,m.pixel_size,m.delta_z,...
+                				 m.n_row,m.n_col,m.n_lay,"none",PS);
+
+
+  S_max=sum(m.image_formation(0)(:));
+
+  K=128; # número de secciones ópticas
+  n_rows=128;
+  
+  psf_model=@(THETA_AUX,PS=0)m.image_formation(THETA_AUX,PS)/S_max;
+
+  ## data=zeros(n_rows,1,K);
+  ## data(:,1,34:97)=sagittal_phantom(18,n_rows,fix(K/2));
+  data=zeros(128);
+  data_yscale=linspace(-n_rows/2*m.pixel_size/m.M,n_rows/2*m.pixel_size/m.M,n_rows);
+
+  data(32:95,32:95)=data(32:95,32:95)+ones(64);
+  data(48:79,48:79)=data(48:79,48:79)-ones(32);
+  lph=line_pattern([10 64],"horizontal");
+  lpv=line_pattern([64 10],"vertical");
+  data(13:22,32:95)=lph;
+  data(105:114,32:95)=fliplr(lph);
+  data(32:95,13:22)=flipud(lpv);
+  data(32:95,105:114)=lpv;
+  data(13:22,13:22)=0.25;
+  data(105:114,13:22)=0.75;
+  data(105:114,105:114)=0.5;
+  data(13:22,105:114)=1;
+  data=reshape(data,n_rows,1,K);
+
+  ## número de fotones
+  max_photon_number=2e3;
+  data=max_photon_number*data;
+  data_b=zeros(size(data));
+  imagen=zeros(size(data));
+  sum_psf_vec=zeros(m.n_lay,K/2);
+  t_s_vec=linspace(-2.2,22.7,K);
+  peak_shift=zeros(1,K);
+  for k=1:length(t_s_vec)
+    tic;
+    [psf_aux, peak_shift(k)]=m.peak_formation(t_s_vec(k));
+    psf{k}=psf_model(t_s_vec(k));
+    toc
+  endfor
+
+##  data_b=optical_sectioning(data,psf_model,t_s_vec,peak_shift);
+   data_b=optical_sectioning(data,psf);
+   g=reshape(gausswin(31,10),1,1,31);
+   g/=max(g(:))/2;
+   data_b_lsfm=optical_sectioning_lsfm(data,psf,g);
+   k_idx_0=find(t_s_vec>=0)(1);
+   k_idx_3=find(t_s_vec>=3)(1);
+   k_idx_7=find(t_s_vec>=7)(1);
+   k_idx_11=find(t_s_vec>=11)(1);
+#  save("-binary","../data/data-for-deconvolution.bin")
+   graphics_toolkit("gnuplot")
+   close all;
+   figure 1;
+   plot(squeeze(psf{1}(16,1,:)/max(psf{1}(:)))); hold on;
+   plot(squeeze(g)); hold off;
+   figure 2;
+   clf;
+   subplot(1,3,1)
+   imagesc(t_s_vec,data_yscale,squeeze(data),[0 max_photon_number]);hold on;
+   line([t_s_vec(k_idx_0) t_s_vec(k_idx_0)], [data_yscale(1) data_yscale(end)],"color","white");hold off
+   subplot(1,3,2)
+   imagesc(squeeze(data_b),[0 max_photon_number])
+   subplot(1,3,3)
+   imagesc(squeeze(data_b_lsfm),[0 max_photon_number])
+   colormap(parula(max_photon_number));
+#+END_SRC
+
+** Pruebas :noexport:
+#+BEGIN_SRC octave :exports none :noweb yes :exports none
+%:tangle ../octave/models/imaging/pruebas.m
+  % PRUEBAS a la funcion: function  IMAGE = stationary_imaging(OBJECT, PSF)
+  clear all;
+  close all;
+
+  addpath(genpath("../../../octave/"));
+  %object = [zeros(1,20), ones(1,30), zeros(1,20)]; % objeto 1D
+  %% usage: disco = disc(N_x, N_y, radio)
+  object = disc(75,75,8);  % objeto 2D
+  %% usage: esfera = sphere(N_x, N_y, N_z, r_int, r_ext)
+  %object = sphere(80,80,80,15,20); % objeto 3D
+
+  Lambda = 0.53; % Wavelength [um]
+  NA = 1.30; % Numerical Aperture para este modelo NA < n_s ellos utilizan 1.4
+  M = 100; % magnification
+  z_d = [160e3 160e3]; % tube length (um) (design)
+  n_oil = [1.515 1.515]; % reffraction index of the inmersion oil (design)
+  t_oil = [180 180];
+  n_g = [1.522 1.522];
+  t_g = [170 170]; % t_g(1)=0.170 [mm] o 170 [um]
+  n_s = 1.33; % reffraction index of the specimen
+
+  if (n_s<NA)
+    rho_aux=n_s/NA;
+  else 
+    rho_aux=1;
+  endif    
+
+  % usage: INTENSITY = gl_psf(rho,NA,M,DZ,n_s,t_s,n_g,t_g,n_oil,t_oil,z_d,x_d,y_d,Lambda,TOL)
+  psf_xyz=@(DZ,X,Y)gl_psf(rho_aux,NA,M,DZ,n_s,0,n_g,t_g,n_oil,t_oil,z_d,X,Y,Lambda,1e-4);
+
+  tic;
+  NX_psf=33; 
+  NY_psf=33; 
+  NZ_psf=33; 
+  x = linspace(-30,30,NX_psf);
+  y = linspace(-30,30,NY_psf);
+  z = linspace(-3,3,NZ_psf);
+  psf_calculada_xyz=zeros(NY_psf,NX_psf,NZ_psf); % PSF de tamaño NY_psf x NX_psf
+  for k=1:NZ_psf
+    for j=1:NY_psf
+      for i=1:NX_psf
+        psf_calculada_xyz(j,i,k)=psf_xyz(z(k),x(i),y(j));
+      endfor
+    endfor
+  endfor
+  toc;
+
+
+  %PSF = psf_calculada_xyz(17,:,17); % Descomentar al probar objetos 1D
+  PSF = psf_calculada_xyz(:,:,17); % Descomentar al probar objetos 2D
+  %PSF = psf_calculada_xyz; % Descomentar al probar objetos 3D
+
+  PSF/= sum(PSF(:));
+  ## usage: IMAGE = stationary_imaging(OBJECT, PSF)
+  image = stationary_imaging(object, PSF); 
+
+
+  %% Descomentar al probar objetos 1D
+  %figure();
+  %figure("visible","off");
+  %subplot(1,2,1);
+  %plot(object);
+  %xlabel("objeto");
+  %subplot(1,2,2);
+  %plot(image);
+  %xlabel("imagen");
+  %print("-dpng","../../../../notas_papers/gibson_lanni_1991/imagen_1D.png");
+
+  %% Descomentar al probar objetos 2D
+  %figure();
+  figure("visible","off");
+  subplot(1,2,1);
+  imshow(object);
+  xlabel("objeto");
+  subplot(1,2,2);
+  imshow(image,[]);
+  xlabel("imagen");
+  print("-dpng","../../../../notas_papers/gibson_lanni_1991/imagen_2D.png");
+
+
+  %% Descomentar al probar objetos 3D
+  %figure();
+  %figure("visible","off");
+  %subplot(3,2,1);
+  %imshow(object(:,:,10));
+  %xlabel("objeto z=10");
+  %subplot(3,2,2);
+  %imshow(image(:,:,10),[]);
+  %xlabel("imagen z=10");
+  %subplot(3,2,3);
+  %imshow(object(:,:,32));
+  %xlabel("objeto z=32");
+  %subplot(3,2,4);
+  %imshow(image(:,:,32),[]);
+  %xlabel("imagen z=32");
+  %subplot(3,2,5);
+  %seccion_sagital= zeros(size(object,1), size(object,3));
+  %imag_sagital = zeros(size(image,1), size(image,3));
+  %for i=1:size(seccion_sagital,1)
+  %  for j=1:size(seccion_sagital,2)
+  %    seccion_sagital(i,j) = object(j,32,i);
+  %    imag_sagital(i,j) = image(j,32,i);
+  %  endfor
+  %endfor
+  %imshow(seccion_sagital);
+  %xlabel("objeto xy=32");
+  %subplot(3,2,6);
+  %imshow(imag_sagital,[]);
+  %xlabel("imagen xy=32");
+  %print("-dpng","../../../../notas_papers/gibson_lanni_1991/imagen_3D.png");
+
+#+END_SRC
+
+Se pueden ver las distintas imágenes formadas en: [[file:imagen_1D.png][imagen unidimensional]], [[file:imagen_2D.png][imagen bidimensional]] e [[file:imagen_3D.png][imagen tridimensional]].
+
+** Airy model
+#+NAME: airy-mode
+#+BEGIN_SRC octave :exports none :tangle ../octave/models/airy_model.m :noweb yes :padline no
+  function PSF=airy_model(LAMBDA,WD,TL)
+    <<octave-license-dz>>
+    ## usage: 
+    ## LAMBDA: wavelength of the ligth
+    ## WD: working distance or focal length
+    ## TL: tube length or image distance
+
+    ## Returns 
+    ## Author: Diaz-Zamboni Javier Eduardo
+    ## Created: 2014/10/16 
+    ## Version: 0.1
+    ##  parameters control
+
+#+END_SRC
+
+** Gibson y Lanni PSF model
+#+NAME: gl_opd_function
+#+BEGIN_SRC octave :exports none :tangle ../octave/models/gl_opd.m :noweb yes :padline no
+  function OPD=gl_opd(rho,NA,M,n_oil,n_s,t_s,DZ,t_oil,n_g,t_g,z_d)
+      <<octave-license-dz>>
+      ## usage: OPD = gl_opd(rho,NA,M,n_oil,n_s,t_s,DZ,t_oil,n_g,t_g)
+      ##
+      ## PHYSICAL PARAMETERS
+      ## rho normalized radius (0<=rho<=1) in the back focal plane
+      ## NA > 0 is the numerical aperture
+      ## M > 0 is the total magnification of the microscope
+      ## s_pixel > 0 is the size of the pixel [um] at the camera
+      ## z_d > 0 is the tube length [um] (design)
+      ## z_dn > 0 is the tube length [um] (real)
+      ## n_oil > 0 and n_oil > NA is the refraction index of the immersion oil (design)
+      ## n_oiln > 0 and n_oiln > NA is the refraction index of the immersion oil (real)
+      ## n_s > 0 and n_s > NA is the refraction index of the specimen
+      ## n_g > 0 and n_g > NA is the refraction index of the coverslip (design)
+      ## n_gn > 0 and n_gn > NA is the refracction index of the coverslip (real)
+      ## t_s > 0 is the depth where the object lies [um].
+      ## t_g > 0 is the coverslip thickness [um] (design).
+      ## t_gn > 0 coverslip thickness [um] (real)
+      ## t_oil >0 is the working distance [um] (design). 
+      ## DZ amount of defocus [um]. 
+      ## Returns 
+      ## Author: Diaz-Zamboni Javier Eduardo
+      ## Created: 2014/10/16 
+      ## Version: 0.1
+      ##  parameters control
+      OPD=-1;
+      ##  if ((Lambda>0) && (NA>0) && (M>0) && (z_d(1)>0) && (z_d(1)n>0) && (n_oil > 0) && (n_oiln>0) && (n_s>0) && (n_g>0) && (t_s>=0) && (t_g>0) && (t_gn>0))
+      ## if ((n_oil>NA)&&(n_oiln>NA)&&(n_s>NA)&&(n_g>NA))
+      OPD=0;
+      sqrt_aux=sqrt(1-(NA*rho/n_oil(2)).^2);
+      if (DZ!=0)
+	OPD+=n_oil(2)*DZ*sqrt_aux;
+      endif
+      if (z_d(1)!=z_d(2))
+	a=z_d(1)*NA/sqrt(M^2-NA^2);
+	OPD+=(z_d(1)-z_d(2))*a^2*n_oil(2)^2/(z_d(1)*z_d(2)*NA^2)*sqrt_aux+a^2*rho.^2*(z_d(1)-z_d(2))/(2*n_oil(2)*z_d(1)*z_d(2));
+      endif  
+  ##    if (t_s!=0)
+	OPD+=n_s*t_s*(sqrt(1-(NA*rho/n_s).^2)-(n_oil(2)/n_s)^2*sqrt_aux);
+  ##    endif
+      if (t_g(1)!=t_g(2)||(n_g(1)!=n_g(2)))
+	OPD+=n_g(2)*t_g(2)*(sqrt(1-(NA*rho/n_g(2)).^2)-(n_oil(2)/n_g(2))^2*sqrt_aux)-(n_g(1)*t_g(1)*(sqrt(1-(NA*rho/n_g(1)).^2)-(n_oil(2)/n_g(1))^2*sqrt_aux));
+      endif 
+      if (n_oil(1)!=n_oil(2))
+	OPD-=n_oil(2)*t_oil*(sqrt(1-(NA*rho/n_oil(2)).^2)-(n_oil(2)/n_oil(1))^2*sqrt_aux);
+      endif
+      ## else 
+      ##  usage("some refraction index is less than the numerical aperture");
+      ##  endif
+      ##else 
+      ##  usage("check parameter values");
+      ## endif  
+    endfunction
+#+END_SRC
+
+#+NAME: gl_psf_function
+#+BEGIN_SRC octave :exports none :tangle ../octave/models/gl_psf.m :noweb yes :padline no
+function [INTENSITY REL_ERR] = gl_psf(X,Y,Z,Lambda,NA,M,z_d,n_oil,t_oil,n_g,t_g,n_s,t_s,TOL)
+    <<octave-license-dz>>
+    ## usage: INTENSITY = gl_psf(X,Y,Z,Lambda,NA,M,z_d,n_oil,t_oil,n_g,t_g,n_s,t_s,TOL)
+    ## The INTENSITY resulting is not intensity normalized.
+    ## IMAGE PARAMETERS
+    ## X, Y and Z are the coordinates in the image space
+    ##
+    ## PHYSICAL PARAMETERS
+    ## Lambda > 0 is the wavelength [um]
+    ## NA > 0 is the numerical aperture
+    ## M > 0 total magnification
+    ## z_d > 0 is the tube length [um] (design)
+    ## n_oil > 0 and n_oil > NA is the refraction index of the immersion oil (design)
+    ## n_s > 0 and n_s > NA is the refraction index of the specimen
+    ## t_s >= 0 is the depth where the object lies [um] measured from the coverslip
+    ## DZ > 0 is the inter plane distance [um]
+    ##  
+    ## NUMERICAL PARAMETERS
+    ## TOL is numerical tolerance for computing the Born and Wolf integral.
+    ##
+    ## Returns 
+    ## Author: Diaz-Zamboni Javier Eduardo
+    ## Created: 2014/10/23
+    ## Version: 0.1
+    ## parameters control
+           
+    INTENSITY=-1;
+    REL_ERR=-1;
+    if ((Lambda>0) && (NA>0) && (M>0)  && (n_s>0) && (TOL>0))
+##    if ((Lambda>0) && (NA>0) && (M>0)  && (n_s>0) && (t_s>=0) && (TOL>0))
+      K=2*pi./Lambda; ##  K: wavelength number 
+      if (n_s<NA)
+        rho_aux=n_s/NA;
+      else 
+        rho_aux=1;
+      endif    
+      a_aux = z_d(1)*NA/sqrt(M^2-NA^2);
+
+      W = @(rho)(K.*gl_opd(rho,NA,M,n_oil,n_s,t_s,Z,t_oil,n_g,t_g,z_d));
+      
+      integrand = @(rho)(besselj(0,(K.*a_aux.*sqrt((X.^2).+(Y.^2)))/z_d(2).*rho).*exp(I*W(rho)).*rho);
+
+      try
+        INTENSITY = abs(1/z_d(2).*quadgk(integrand,0,rho_aux,"RelTol",TOL)).^2;
+      catch
+        disp("Gibson Lanni model, trying quadv integration");
+        INTENSITY = abs(1/z_d(2).*quadv(integrand,0,rho_aux,TOL)).^2;     
+      end_try_catch
+
+    else
+      usage("check parameter values");
+    endif  
+
+  endfunction
+#+END_SRC
+
+#+NAME: generate_image_stack_function
+#+BEGIN_SRC octave :exports none :tangle ../octave/models/generate_image_stack.m :noweb yes :padline no
+function [IMAGE Z_MAX]=generate_image_stack(F,x_pixel_size,y_pixel_size,z_step,n_row,n_col,n_lay,NORM,PEAK_Z_SHIFT=0)
+<<octave-license-dz>>
+    ## usage: [IMAGE Z_MAX]=generate_image_stack(F,x_pixel_size,y_pixel_size,z_step,n_row,n_col,n_lay,NORM,PEAK_Z_SHIFT=0)
+    z_ini=0;
+    F_Z_MAX=@(Z)-1*F(0,0,Z);
+    Z_MAX= fminsearch(F_Z_MAX,z_ini);
+    F_MAX=F(0,0,Z_MAX);
+    SUM_MAX_VALUE=-Inf;
+    if ((n_col>=1)&&(n_row>=1)&&(n_lay>=1))
+      if (mod(n_col,2)==0)
+        X=linspace(0,n_col/2*x_pixel_size,n_col/2);
+      else
+        X=linspace(0,(n_col+1)/2*x_pixel_size,fix(n_col/2)+2);
+      endif
+      if (mod(n_row,2)==0)
+        Y=linspace(0,n_row/2*y_pixel_size,n_row/2);
+      else
+        Y=linspace(0,(n_row+1)/2*y_pixel_size,fix(n_row/2)+2);
+      endif
+      if (mod(n_lay,2)==0)
+        Z=linspace(PEAK_Z_SHIFT+Z_MAX-n_lay/2*z_step,PEAK_Z_SHIFT+Z_MAX+n_lay/2*z_step,n_lay);
+      else
+        Z=linspace(PEAK_Z_SHIFT+Z_MAX-(n_lay+1)/2*z_step,PEAK_Z_SHIFT+Z_MAX+(n_lay+1)/2*z_step,n_lay+2);
+        aux_rem=[1 n_lay+2];
+        Z(:,aux_rem)=[];
+      endif
+
+      IMAGE=zeros(n_row,n_col,n_lay);
+      for k=1:n_lay
+        for i=fix(n_row/2)+1:n_row
+          for j=fix(n_col/2)+1:n_col
+            intensity=F(X(j-fix(n_col/2)),Y(i-fix(n_row/2)),Z(k));
+            IMAGE(i,j,k)=intensity; ## first quadrant
+            ## intensity=F(X(j-fix(n_col/2)),Y(i-fix(n_row/2)),Z(k));
+            IMAGE(i,n_col-j+1,k)=intensity; ## second quadrant
+            ## intensity=F(X(j-fix(n_col/2)),Y(i-fix(n_row/2)),Z(k));
+            IMAGE(n_row-i+1,n_col-j+1,k)=intensity; ## third quadrant
+            ## intensity=F(X(j-fix(n_col/2)),Y(i-fix(n_row/2)),Z(k));
+            IMAGE(n_row-i+1,j,k)=intensity;## fourth quadrant
+          endfor
+        endfor
+        if ((n_row>1) || (n_col>1))
+          if (sum((IMAGE(:,:,k)(:)))>SUM_MAX_VALUE)
+            SUM_MAX_VALUE=sum(IMAGE(:,:,k)(:)); 
+          endif
+        else
+          IMAGE(:,:,k)/=F_MAX;
+        endif
+      endfor
+##      if (((n_row>1) || (n_col>1)))
+##        IMAGE/=SUM_MAX_VALUE;
+##      endif
+      switch NORM
+        case {"sum" "SUM"}
+          IMAGE/=sum(IMAGE(:));
+        case {"max" "MAX"}
+          IMAGE/=max(IMAGE(:));   
+      endswitch    
+    endif
+  endfunction
+#+END_SRC
+
+*** Common setup for G&L model testing
+#+NAME: gl-model-setup
+#+begin_src octave :exports none :eval no
+m.Lambda = 0.560;  
+m.NA = 0.75;
+  m.M = 20; 
+  m.z_d = [160e3 160e3]; 
+  m.n_oil = [1.515 1.515]; 
+  m.t_oil=100;
+  m.n_g=[1.52 1.52];
+  m.t_g=[1 1];
+  m.n_s = 1.33; 
+  m.delta_z=0.09;
+  m.tol=1e-5;
+  m.pixel_size=4;  
+  m.n_col=1;
+  m.n_row=71;
+  m.n_lay=71; 
+
+#+end_src
+
+#+NAME:gl-model-scales-setup
+#+BEGIN_SRC  octave :exports none
+  scale_x=linspace(-m.pixel_size*m.n_col/(2*m.M),m.pixel_size*m.n_col/(2*m.M),m.n_col);
+  scale_y=linspace(-m.pixel_size*m.n_row/(2*m.M),m.pixel_size*m.n_row/(2*m.M),m.n_row);
+  scale_z=linspace(-m.delta_z*m.n_lay/2,m.delta_z*m.n_lay/2,m.n_lay);
+  middle_row=fix(m.n_row/2)+1;
+  middle_col=fix(m.n_col/2)+1;
+  middle_layer=fix(m.n_lay/2)+1;
+     #+END_SRC
+
+#+NAME: gl-model-functions-setup
+#+BEGIN_SRC octave :exports none
+
+      m.gl_psf_punctual=@(X,Y,Z,T_S)gl_psf(X,Y,Z,m.Lambda,m.NA,m.M,m.z_d,m.n_oil,m.t_oil,m.n_g,m.t_g,m.n_s,T_S,m.tol);
+
+      m.gl_psf_pixelated=@(X,Y,Z,T_S)intensity_over_pixel_area(@(XX,YY)gl_psf_punctual(XX,YY,Z,T_S),X,Y,m.pixel_size,m.pixel_size,m.tol);
+
+      m.image_formation = @(T_S,NORM)generate_image_stack(@(XX,YY,ZZ)m.gl_psf_punctual(XX,YY,ZZ,T_S),...
+                                                      m.pixel_size,m.pixel_size,m.delta_z,...
+                                                      m.n_row,m.n_col,m.n_lay,NORM);
+
+    m.image_formation_pix = @(T_S,NORM)generate_image_stack(@(XX,YY,ZZ)m.gl_psf_pixelated(XX,YY,ZZ,T_S),...
+                                                      m.pixel_size,m.pixel_size,m.delta_z,...
+                                                      m.n_row,m.n_col,m.n_lay,NORM);
+                                                    
+     #+END_SRC

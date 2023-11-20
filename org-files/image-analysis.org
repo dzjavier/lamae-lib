@@ -1,0 +1,242 @@
+* TODO OIQA Optical image quantitative analysis
+** SSIM
+#+BEGIN_SRC octave :exports none :tangle ../octave/image-analysis/ssim.m
+function [QI,CORR,LUM,CON] = ssim(X,Y,window,K,L);
+  %% ----------------------------------------------------------------
+  %% Code modified from:
+  %% https://ece.uwaterloo.ca/~z70wang/research/ssim/ssim_index.m
+  %% Reference paper:
+  %% Z. Wang, A. C. Bovik, H. R. Sheikh, and E. P. Simoncelli, "Image
+  %% quality assessment: From error measurement to structural similarity"
+  %% IEEE Transactios on Image Processing, vol. 13, no. 1, Jan. 2004.
+  %% ------------------------------------------------------------------
+  %% This function compute de structural similarity index of the images
+  %% X and Y and its components: Luminance, contrast and correlation
+  %% usage 1 : ssim (X,Y)
+  %% usage 2 : ssim (X,Y,window)
+  %% usage 3 : ssim (X,Y,window,K)
+  %% usage 4 : ssim (X,Y,window,K,L)
+  %% X and Y are the images for comparing, "window" is the window of
+  %% analysis, K is vector of two small constants that are
+  %% passed to assure numerical stability when denominators are
+  %% close to zero and L is the maximum value of the dynamic range of
+  %% the images.
+  %% ------------------------------------------------------------------
+  %% Version 1.0
+  %% Year 2012
+  %% Author: Javier E. Diaz Zamboni. Facultad de Ingeniería, Universidad
+  %% Nacional de Entre Ríos, Argentina.
+  %% contact: javierdiaz(at)bioingenieria(dot)edu(dot)ar
+  %% ------------------------------------------------------------------
+  
+  if ((nargin < 2 || nargin > 5)||(size(X) ~= size(Y)))
+    QI = -Inf;
+    CORR = -Inf;
+    LUM = -Inf;
+    CON = -Inf;
+    return;
+  endif;
+  [M N] = size(X);
+  if (nargin == 2)
+    if ((M < 11) || (N < 11))
+      QI = -Inf;
+      CORR = -Inf;
+      LUM = -Inf;
+      CON = -Inf;
+      return;     
+    endif;
+    window = fspecial('gaussian', 11, 1.5);	
+    K(1) = 0.01;			
+    K(2) = 0.03;					
+    L = 255;                                  
+  endif;
+  if (nargin == 3)
+    if ((M < 11) || (N < 11))
+      QI = -Inf;
+      CORR = -Inf;
+      LUM = -Inf;
+      CON = -Inf;
+      return;
+    endif;
+    window = fspecial('gaussian', 11, 1.5);
+    L = 255;
+    if (length(K) == 2)
+      if (K(1) < 0 || K(2) < 0)
+	QI = -Inf;
+	CORR = -Inf;
+	LUM = -Inf;
+	CON = -Inf;
+	return;
+      endif;
+    else
+      QI = -Inf;
+      CORR = -Inf;
+      LUM = -Inf;
+      CON = -Inf;
+      return;	   
+    endif;
+  endif;
+  if (nargin == 4)
+    [H W] = size(window);
+    if ((H*W) < 4 || (H > M) || (W > N))
+      QI = -Inf;
+      CORR = -Inf;
+      LUM = -Inf;
+      CON = -Inf;
+      return;	   
+    endif;
+    L = 255;
+    if (length(K) == 2)
+      if (K(1) < 0 || K(2) < 0)
+	QI = -Inf;
+	CORR = -Inf;
+	LUM = -Inf;
+	CON = -Inf;
+	return;	   
+      endif;
+    else
+      QI = -Inf;
+      CORR = -Inf;
+      LUM = -Inf;
+      CON = -Inf;
+      return;	   
+    endif;
+  endif;
+  if (nargin == 5)
+    [H W] = size(window);
+    if ((H*W) < 4 || (H > M) || (W > N))
+      QI = -Inf;
+      CORR = -Inf;
+      LUM = -Inf;
+      CON = -Inf;
+      return;	   
+    endif;
+    if (length(K) == 2)
+      if (K(1) < 0 || K(2) < 0)
+	QI = -Inf;
+	CORR = -Inf;
+	LUM = -Inf;
+	CON = -Inf;
+	return;	   
+      endif;
+    else
+      QI = -Inf;
+      CORR = -Inf;
+      LUM = -Inf;
+      CON = -Inf;
+      return;	   
+    endif;
+  endif;
+
+  C1 = (K(1)*L)^2;
+  C2 = (K(2)*L)^2;
+  window = window/sum(window(:));
+  X = double(X);
+  Y = double(Y);
+  mu1 = filter2(window, X, 'valid');
+  mu2 = filter2(window, Y, 'valid');
+  mu1_sq = mu1.*mu1;
+  mu2_sq = mu2.*mu2;
+  mu1_mu2 = mu1.*mu2;
+  sigma1_sq = filter2(window, X.*X, 'valid') - mu1_sq;
+  sigma2_sq = filter2(window, Y.*Y, 'valid') - mu2_sq;
+  index=sigma1_sq<0;
+  sigma1_sq(index)=0;
+  index=sigma2_sq<0;
+  sigma2_sq(index)=0;
+
+  sigma12 = filter2(window, X.*Y , 'valid') - mu1_mu2;
+  LUM=(2*mu1.*mu2+C1)./(mu1_sq+mu2_sq+C1);
+  
+  CON=(2*sqrt(sigma1_sq).*sqrt(sigma2_sq)+C2)./(sigma1_sq+sigma2_sq+C2);
+  
+  CORR=(sigma12+C2/2)./(sqrt(sigma1_sq).*sqrt(sigma2_sq)+C2/2);
+  
+  QI=CORR.*LUM.*CON;
+  
+endfunction
+
+#+END_SRC
+** PSNR
+#+BEGIN_SRC octave :exports none :tangle ../octave/image-analysis/psnr.m
+function PSNR = psnr(OR_IMAGE,MOD_IMAGE,MAX_INTENSITY)
+# usage: psnr(OR_IMAGE,MOD_IMAGE,MAX_INTENSITY)
+         MSE=meansq((OR_IMAGE-MOD_IMAGE)(:));
+         PSNR=20*log10(MAX_INTENSITY/sqrt(MSE));
+endfunction
+#+END_SRC
+
+* Visualization
+** Visualization planos ortogonales XYZ
+#+BEGIN_SRC octave :exports none :tangle ../octave/image-analysis/ortho_view_3d.m
+function H=ortho_view_3d(DATA,Y_PLANE,X_PLANE,Z_PLANE,Y_RES,X_RES,Z_RES)
+  ## usage: ortho_view_3d(DATA,Y_PLANE,X_PLANE,Z_PLANE,Y_RES,X_RES,Z_RES)
+  ## 
+  ## DATA is a threedimensional array 
+  ## Y_PLANE, X_PLANE and Z_PLANE are the planes to visualize
+  ## Y_RES, X_RES and Z_RES are the resolution to plot scale bars in micrometers
+  ## Returns 
+  ## Author: Diaz-Zamboni Javier Eduardo
+  ## Created: 201
+
+  bar_size=0.15;
+  [nx ny nz]=size(DATA);
+  h_z=fix(bar_size*nz);
+  z_f=nz-fix(0.05*nz);
+  z_i=z_f-h_z;
+  
+  h_y=fix(bar_size*ny);
+  y_f=ny-fix(0.05*ny);
+  y_i=y_f-h_y;
+
+  h_x=fix(bar_size*nx);
+  x_f=nx-fix(0.05*nx);
+  x_i=x_f-h_x;
+ 
+  H=figure;
+  m=max(DATA(:));
+  %% XY plane
+  subplot(2,2,1)
+%  imag_aux=zeros(nx,ny);
+  imag_aux=squeeze(DATA(:,:,Z_PLANE))/m;
+  imagesc(imag_aux(:,:),[]);
+  axis off;
+  colormap(jet);
+  colorbar("EastOutside");
+  line([fix(0.05*nx) fix(0.05*nx)],[y_i y_f],"color","white","linewidth",3); % vertical calibration bar 
+  text(fix(0.06*nx),y_f-h_y/2,strcat(num2str(h_y*Y_RES,2),"um"), "fontsize",9,"color","white");
+  line([x_i x_f], [fix(0.05*ny) fix(0.05*ny)], "color","white","linewidth",3); % Horizontal calibration bar 
+  text(y_i,fix(0.08*nx),strcat(num2str(h_x*X_RES,2),"um"), "fontsize",9,"color","white");%hold off;
+  xlabel("X-Y Plane");
+  
+  %% y-z plane
+  subplot(2,2,2)
+%  imag_aux=zeros(ny,nz);
+  imag_aux=squeeze(DATA(:,X_PLANE,:))/m;
+  imagesc(imag_aux(:,:),[]);
+  axis off;
+  colormap(jet);
+  colorbar("EastOutside");
+  line([fix(0.05*nz) fix(0.05*nz)],[y_i y_f],"color","white","linewidth",3); % vertical calibration bar 
+  text(fix(0.06*nz),y_f-h_y/2,strcat(num2str(h_y*Y_RES,2),"um"), "fontsize",9,"color","white");
+  line([y_i y_f], [fix(0.05*nz) fix(0.05*nz)], "color","white","linewidth",3); % Horizontal calibration bar 
+  text(y_i,fix(0.08*nz),strcat(num2str(h_z*Z_RES,2),"um"), "fontsize",9,"color","white");%hold off;
+  xlabel("Y-Z Plane");
+
+  
+  %% x-z plane
+  subplot(2,2,3)
+  %% imag_aux=zeros(nx,nz);
+  imag_aux=squeeze(DATA(Y_PLANE,:,:))/m;
+  imagesc(imag_aux(:,:)',[]);
+  axis off;
+  colormap(jet);
+  colorbar("EastOutside");
+  line([fix(0.05*nx) fix(0.05*nx)],[z_i z_f], "color","white","linewidth",3); % vertical calibration bar 
+  text(fix(0.06*nx),z_f-h_z/2,strcat(num2str(h_z*Z_RES,2),"um"), "fontsize",9,"color","white");
+  line([x_i x_f], [fix(0.05*nz) fix(0.05*nz)], "color","white","linewidth",3); % Horizontal calibration bar 
+  text(x_i,fix(0.08*nz),strcat(num2str(h_x*X_RES,2),"um"), "fontsize",9,"color","white");%hold off;
+  xlabel("X-Z Plane");
+
+endfunction
+#+END_SRC

@@ -1,0 +1,1 @@
+run("Image Sequence...", "open=C:\\Javier\\Programming\\Turbo_SUMDD\\Output\\Samples\\esfHep\\esf2052.TIF number=2 starting=1 increment=1 scale=100 file=[] or=[] sort");

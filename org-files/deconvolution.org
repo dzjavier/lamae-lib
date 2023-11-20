@@ -1,0 +1,2907 @@
+* Introducción
+** Modelo de formación 						   :noexport:
+   Carga de valores por defecto para modelo de Gibson y Lanni para usar como generador de PSFs.
+
+  #+NAME: gl-model-setup
+  #+begin_src octave :exports none :eval no
+  m.Lambda = 0.560;  
+  m.NA = 1.35;
+  m.M = 100; 
+  m.z_d = [160e3 160e3]; 
+  m.n_oil = [1.515 1.515]; 
+  m.t_oil=100;
+  m.n_g=[1 1];
+  m.t_g=[1 1];
+  m.n_s = 1.33; 
+  m.delta_z=0.18;
+  m.tol=1e-5;
+  m.gl_psf_punctual=@(X,Y,Z,T_S)gl_psf(X,Y,Z,m.Lambda,m.NA,m.M,m.z_d,m.n_oil,m.t_oil,m.n_g,m.t_g,m.n_s,T_S,m.tol);
+  m.pixel_size=9;  
+
+  m.gl_psf_pixelated=@(X,Y,Z,T_S)intensity_over_pixel_area(@(XX,YY)gl_psf_punctual(XX,YY,Z,T_S),X,Y,m.pixel_size,m.pixel_size,m.tol);
+  m.n_col=1;
+  m.n_row=1;
+  m.n_lay=45;
+  m.image_formation = @(T_S,NORM)generate_image_stack(@(XX,YY,ZZ)m.gl_psf_punctual(XX,YY,ZZ,T_S),...
+                                                      m.pixel_size,m.pixel_size,m.delta_z,...
+                                                      m.n_col,m.n_row,m.n_lay,NORM);
+
+  m.image_formation_pix = @(T_S,NORM)generate_image_stack(@(XX,YY,ZZ)m.gl_psf_pixelated(XX,YY,ZZ,T_S),...
+                                                      m.pixel_size,m.pixel_size,m.delta_z,...
+                                                      m.n_col,m.n_row,m.n_lay,NORM);
+  #+END_SRC
+   
+** Filtro inverso de Wiener
+*** Versión octave
+    #+NAME: wdeconv
+    #+BEGIN_SRC octave :exports none :tangle ../octave/image-processing/wdeconv.m :padline no
+      function [ESTIMATED_OBJECT] = wdeconv(IMAGE, PSF, varargin) 
+        ## usage: [ESTIMATED_OBJECT, MSE] = wdeconv(IMAGE, PSF,SNR=10) 
+        ## Linear Deconvolution Method
+        ## IMAGE is the acquired image
+        ## PSF is the point spread function
+        ## SNR is the signal noise ratio assuming gaussian independent noise
+        ## Returns 
+        ## ESTIMATED_OBJECT
+        ## Author: Javier Eduardo Diaz Zamboni
+        ## Created: 2003/09/23
+        ## Version: 0.2
+        ## Maintainer: Javier Eduardo Diaz Zamboni
+        ## Revision: 2017/02/17
+        options=struct("snr",10);
+  
+        ## count arguments 
+        if ((nargin-2)==1)
+          options=test_function_options(options,varargin{1});
+        else
+          if ((nargin-2)>1)
+    	   options=test_function_options(options,varargin);
+          endif
+        endif
+  
+        ESTIMATED_OBJECT = IMAGE;
+        Co = zeros(size(IMAGE));
+        Ho = fftn(PSF,size(IMAGE));
+        Go = fftn(IMAGE);
+        Co = conj(Ho);
+        Fo =  Go .* abs(Co ./ (abs(Ho).^2 + 1./options.snr));
+        ESTIMATED_OBJECT = abs(ifftn(Fo));
+  
+      endfunction
+    #+END_SRC
+    #+NAME: wdeconv-test
+    #+BEGIN_SRC octave :exports none :noweb yes :tangle ../octave/image-processing/wdeconv_test.m :padline no
+      addpath(genpath("../../octave"))
+      <<gl-model-setup>>
+      m.n_col=51;
+      m.n_row=51;
+      m.n_lay=1;
+      m.pixel_size=9;
+      peak_shift=-1.0;
+      t_s=5;
+      m.image_formation = @(T_S,NORM)generate_image_stack(@(XX,YY,ZZ)m.gl_psf_punctual(XX,YY,ZZ,T_S),...
+                                                          m.pixel_size,m.pixel_size,m.delta_z,...
+                                                          m.n_row,m.n_col,m.n_lay,NORM,peak_shift);
+      S_max=sum(m.image_formation(0,"none")(:));
+      psf=m.image_formation(t_s,"none")/S_max;
+      data=zeros(128);
+      data(32:95,32:95)=data(32:95,32:95)+ones(64);
+      data(48:79,48:79)=data(48:79,48:79)-ones(32);
+      data(100:110,100)=1;
+      data(100:110,102)=1;
+      data(10,100:110)=0.3;
+      data(12,100:110)=0.3;
+      data=100*data;
+      data_b=abs(ifft2(fft2(data).*(abs(fft2(psf,128,128)))));
+      data_n=poissrnd(data_b);
+      ## data_n=data_b+normrnd(100,2,size(data_b));
+      C=10;
+      [estimated_data_n]=wdeconv(data_n,psf,"snr",C); 
+      [estimated_data_b]=wdeconv(data_b,psf,"snr",C); 
+      graphics_toolkit("gnuplot");
+      figure(1);
+      set(gcf,'Color',[.5,.5,.5]) 
+      subplot(2,3,1)
+      imshow(data,[])
+      subplot(2,3,2)
+      imshow(data_b,[]); 
+      subplot(2,3,3)
+      imshow(data_n,[]);
+      subplot(2,3,4)
+      imshow(psf,[]);
+      subplot(2,3,6)
+      imshow(estimated_data_n,[]);
+      subplot(2,3,5)
+      imshow(estimated_data_b,[]);
+      colormap(parula)
+   #+END_SRC
+
+** LLS by Preza :noexport:
+*** Versión octave
+    #+NAME: llsdeconv
+    #+BEGIN_SRC octave :exports none :tangle ../octave/image-processing/llsdeconv.m :padline no
+  function [ESTIMATED_OBJECT] = llsdeconv(IMAGE, PSF,NOISE_CONSTANT=0.1) 
+    ## usage: [ESTIMATED_OBJECT] = wdeconv(IMAGE, PSF,NOISE_CONSTANT=0.1) 
+    ## Linear Deconvolution Method
+    ## IMAGE is the acquired image
+    ## PSF is the point spread function
+    ## Returns 
+    ## ESTIMATED_OBJECT
+    ## Author: Javier Eduardo Diaz Zamboni
+    ## Created: 2003/09/23
+    ## Version: 0.2
+    ## Maintainer: Javier Eduardo Diaz Zamboni
+    ## Revision: 2017/02/17
+
+    N = length(IMAGE);
+    n = length(PSF);
+    NN=N*N;
+    KNN=K*NN;
+
+    A = zeros(N);
+    A1 = zeros(N);
+    A(1:n,1:n) = imread(strcat(psfdir,num2str(psfnum),'.tif'));
+    aux = 0;
+    for i = psfnum + 1 : psfnum + (K - 1)
+      A1(1:n,1:n) = imread(strcat(psfdir,num2str(psfnum + DZ*aux),'.tif'));
+      A  = cat(2,A,A1);
+      aux=aux+1;
+    end
+    sss =  zeros(KNN,1);
+    sss = Circulant(A, N, K); % Funcion que devuelve un vector columna obtenido de una matriz en bloque circular con la informacion 3D.
+  
+
+    clear A A1 i; 
+
+    Mu = fft(sss); % Aplicacion de dos FFT para determinar los autovalores Mu de sss. Estos resultados estan en la diagonal de Tsss. 
+
+    clear sss;
+
+  %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+  % Determinacion de los autovalores de sss para obtener los autovalores de
+  % la pseudoinversa de sss.
+  %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+    MuOr = zeros(KNN,1);
+
+    aux = sort(Mu);
+
+    for i=1:KNN
+      MuOr(i)= aux(KNN+(1-i));
+    end
+
+    clear aux i;
+
+    AVal = MuOr/max(abs(Mu));
+
+    clear Mu;
+
+    MuOptimo = 0.0001; % Seleccion de los autovalores optimos de sss para la determinacion del estimador.
+
+
+    for lh = 0:fix(NI/K)
+
+      t1 = cputime; % Toma tiempo inicial. es para evaluar la velocidad de la ejecucion completa  de la implementacion del algoritmo.
+
+
+  %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+  % El siguientes ciclo While organiza el conjunto de imagenes como un vector columna
+  % donde se toman los renglones se los trasponen y se los va apilando uno
+  % debajo del otro, del primero al ultimo y desde la primer imagen a la
+  % ultima.
+  %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+      chi = zeros(KNN,1);
+      c=1;
+      LL=0;
+      while LL <= K-1
+	Im = imread(strcat(DirIn,num2str(NumIn+LL),'.tif'));
+	for i=1:N
+          chi(c:c+N-1)=Im(:,i)';
+          c = c + N;
+	end
+	LL = LL+1;
+      end
+      SumChi = sum(chi);
+      clear LL Im c;
+
+      Machi=max(chi);
+      chiLim = [ min(chi) max(chi)];
+				  %chi=chi/Machi;
+
+  %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+  % Ultimas expreciones. La segunda es la formula del estimador.
+  %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+      chik = (fft(chi)); % Exprecion del vector de la pila de imagenes en el cnjunto ortogonal de autovectores dado por la matriz de transformacio de Fourier.
+
+      aux= zeros(KNN,1);
+
+      for i=1:KNN
+	if abs(AVal(i))^2 >= MuOptimo 
+          aux(i) = ((chik(i))/abs(AVal(i))^2); % Formula del estimador.
+	else
+          aux(i)=0;
+	end
+      end
+
+      clear chi chik;
+
+      Taok = abs(ifft(aux));
+      TaokM = max(Taok);
+				  % Taok = Taok/Machi;
+      Taok = Taok/TaokM;
+
+
+  %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+  % El siguientes ciclo While organiza reoganiza el resultado Taok como una
+  % pila de imagenes. es el proceso inveros al descrito en el ciclo anterior.
+  % Las imagenes obtenidas luego son visualizadas.s
+  %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+  %E = sum(abs(chi-Taok))/SumChi;
+
+      IR = zeros(N);
+      c = 1;
+      LL = 0;
+      while LL <= K-1
+	for i=1:N
+          IR(i,:) = 255*Taok(c:c+N-1)';
+          c = c + N;
+	end
+	imwrite(uint8(IR'),strcat(DirOut,num2str(NumOut + LL),'.tif'),'tif');
+	LL = LL + 1;
+      end
+
+      %disp(strcat('Error (%): ',num2str(100*E)));   
+
+      clear E LL c aux IR Taok chiLim Mu SumChi Machi;
+
+      NumIn = NumIn + K;     
+      NumOut = NumOut + K;     
+
+      cputime - t1
+
+      beep; beep; beep;
+
+    end;
+  endfunction
+    #+END_SRC
+    #+NAME: llsdeconv-test
+    #+BEGIN_SRC octave :exports none :noweb yes :tangle ../octave/image-processing/llsdeconv_test.m :padline no
+    addpath(genpath("../../octave"))
+    <<gl-model-setup>>
+   m.n_col=51;
+   m.n_row=51;
+   m.n_lay=1;
+   m.pixel_size=9;
+   peak_shift=-1.0;
+   t_s=5;
+   m.image_formation = @(T_S,NORM)generate_image_stack(@(XX,YY,ZZ)m.gl_psf_punctual(XX,YY,ZZ,T_S),...
+                                                          m.pixel_size,m.pixel_size,m.delta_z,...
+                                                          m.n_col,m.n_row,m.n_lay,NORM,peak_shift);
+   psf=m.image_formation(t_s,"none");
+   data=zeros(128);
+   data(32:95,32:95)=data(32:95,32:95)+ones(64);
+   data(48:79,48:79)=data(48:79,48:79)-ones(32);
+   data(100:110,100)=1;
+   data(100:110,102)=1;
+   data(10,100:110)=0.3;
+   data(12,100:110)=0.3;
+   data=100*data;
+   data_b=abs(ifft2(fft2(data).*(abs(fft2(psf,128,128)))));
+  ## data_n=poissrnd(data_b);
+   data_n=data_b+normrnd(100,2,size(data_b));
+   C=1e-2;
+   [estimated_data_n]=wdeconv(data_n,psf,C); 
+   [estimated_data_b]=wdeconv(data_b,psf,C); 
+   graphics_toolkit("gnuplot");
+   figure(1);
+   set(gcf,'Color',[.5,.5,.5]) 
+   subplot(2,3,1)
+   imshow(data,[])
+   subplot(2,3,2)
+   imshow(data_b,[]); 
+   subplot(2,3,3)
+   imshow(data_n,[]);
+   subplot(2,3,4)
+   imshow(psf,[]);
+   subplot(2,3,6)
+   imshow(estimated_data_n,[]);
+   subplot(2,3,5)
+   imshow(estimated_data_b,[]);
+   colormap(gray)
+
+    #+END_SRC
+
+** Algoritmo de Jansson-Van Cittert
+*** Versión octave
+    #+NAME: jvcdeconv
+    #+BEGIN_SRC octave :exports none :tangle ../octave/image-processing/jvcdeconv.m :padline no
+      function [ESTIMATED_OBJECT, COMPARISON_VALUE] = jvcdeconv(IMAGE, PSF,varargin) 
+        ## usage: [ESTIMATED_OBJECT, SE] = jvcdeconv(IMAGE, PSF, OPTIONS)
+        ## Nonlinear Deconvolution Method
+        ## IMAGE is the acquired image
+        ## PSF is the point spread function 
+        ## TOL is the minimal error accepted between actual data and in the estimated data
+        ## MAX_ITER is the highest amount of iterations to be run if the specified tolerance value (TOL) has not been reached
+        ##
+        ## Returns 
+        ## ESTIMATED_OBJECT
+        ## SE is a vector containing the square error for the difference between IMAGE and the estimated image
+        ## Maintainer: Javier Eduardo Diaz Zamboni
+        ## Version: 0.3
+
+        ## Revision: 2017/12/15
+        ## History revision: Refactor. No noise filtering option when empty.
+
+        ## Revision: 2017/05/19
+        ## History revision: Adding idiv comparison method
+
+        ## Revision: 2017/05/15
+        ## History revision: Adding varargin parameter control
+
+        ## Revision: 2017/02/20
+        ## History revision: Adding square, abs and cittert relaxation functions.
+
+        ## Revision: 2016/12/21
+        ## History revision: Adding return MSE vector.
+
+        ## Author: Mauricio Tanus Mafud
+        ## Created: 2015/09/23
+
+        options=struct("exponent",1,...
+                       "relaxation","square",...
+    		   "max_iter",50,...
+    		   "tol",1e-3,...
+    		   "noise_filtering","gaussian",...
+    		   "iterations_per_filtering",1,...
+    		   "filter_size",3,...
+    		   "comparison","se",...
+            	   "gaussian_spread",0.4,...
+            	   "wiener_snr",100);
+
+        if ((nargin-2)==1)
+          options=test_function_options(options,varargin{1});
+        else
+          if ((nargin-2)>1)
+    	options=test_function_options(options,varargin);
+          endif
+        endif
+
+        switch options.comparison
+          case {"se"}
+          case {"idiv"}
+          otherwise
+    	error("%s is not a valid comparison method",options.comparison)
+        endswitch
+
+        im_size=size(IMAGE);
+        ESTIMATED_OBJECT = zeros(im_size);
+        current_estimated_obj = zeros(im_size);
+        estimated_image = zeros(im_size);
+        reached_TOL = false;
+    	IMAGE_aux = IMAGE;
+        if (~strcmp(options.noise_filtering,""))
+          switch options.noise_filtering
+    	case {"wiener"}
+    	  IMAGE_aux=wdeconv((IMAGE),PSF/sum(PSF(:)),"snr",options.wiener_snr);
+    	case {"gaussian"}
+              if (im_size(1)>=options.filter_size)
+                rows=options.filter_size;
+              else
+                rows=im_size(1);
+              endif
+              if (im_size(2)>=options.filter_size)
+                cols=options.filter_size;
+              else
+                cols=im_size(2);
+              endif
+              w=fspecial("gaussian",[rows cols],options.gaussian_spread);
+              IMAGE_aux=abs(ifft2(fft2(IMAGE).*abs(fft2(w,im_size(1),im_size(2)))));
+    	otherwise
+    	  error("'%s' is an invalid value for NOISE_FILTERING",options.noise_filtering)
+          endswitch
+        endif
+        next_estimated_obj = IMAGE_aux;
+        iter = 1;
+
+        while ((iter <= options.max_iter) && (reached_TOL!=true))
+          current_estimated_obj = next_estimated_obj;
+          estimated_image = stationary_imaging(current_estimated_obj,PSF);
+          switch options.relaxation
+    	case {"square"}
+    	  A = max(IMAGE(:))/2; 
+    	  gamma=1 - (current_estimated_obj - A).^2 ./ (A^2); ## Petter Jansson (1984);
+    	case {"abs"}
+              A = max(IMAGE(:));
+    	  gamma = 1 - (2/A)*abs(current_estimated_obj - A/2); ## Petter Jansson (1970)
+    	case {"cittert"}
+    	  gamma = 1; ## Van Cittert 1931
+    	otherwise 
+              error("Invalid value for RELAXATION");
+          endswitch
+          next_estimated_obj = current_estimated_obj + gamma .* (IMAGE-estimated_image).^options.exponent;
+          next_estimated_obj(next_estimated_obj< 0) = 0;# forcing positivity constraint
+
+          ## filtering
+
+          if (~(strcmp(options.noise_filtering,""))&&(mod(iter,options.iterations_per_filtering)==0))
+    	switch options.noise_filtering
+    	  case {"wiener"}
+                next_estimate_obj=wdeconv(next_estimated_obj,PSF/sum(PSF(:)),"snr",options.wiener_snr);
+    	  case {"gaussian"}
+                next_estimated_obj=abs(ifft2(fft2(next_estimated_obj).*abs(fft2(w,im_size(1),im_size(2)))));
+    	endswitch
+          endif
+          iter += 1;
+        endwhile
+        switch options.comparison
+          case {"se"}
+    	    COMPARISON_VALUE = sumsq(IMAGE(:)-estimated_image(:));
+          case {"idiv"}
+    	    COMPARISON_VALUE = i_divergence(IMAGE(:),estimated_image(:));
+          otherwise
+    	    error("%s is not a valid comparison method",options.comparison)
+        endswitch
+        ESTIMATED_OBJECT = next_estimated_obj;
+      endfunction
+    #+END_SRC
+
+    #+NAME: jvcdeconv-test-01
+    #+BEGIN_SRC octave :exports none :noweb yes :tangle ../octave/image-processing/jvcdeconv_test.m :padline no
+  addpath(genpath("../../octave"))
+  <<gl-model-setup>>
+  m.n_col=51;
+  m.n_row=51;
+  m.n_lay=1;
+  m.pixel_size=13;
+  peak_shift=-1.0;
+  t_s=5;
+  m.image_formation = @(T_S,NORM)generate_image_stack(@(XX,YY,ZZ)m.gl_psf_punctual(XX,YY,ZZ,T_S),...
+                                                      m.pixel_size,m.pixel_size,m.delta_z,...
+                                                      m.n_row,m.n_col,m.n_lay,"none",peak_shift);
+  S_0=sum(m.image_formation(0)(:));
+  psf=m.image_formation(t_s,"none")/S_0;
+  data=zeros(128);
+  data(32:95,32:95)=data(32:95,32:95)+ones(64);
+  data(48:79,48:79)=data(48:79,48:79)-ones(32);
+  data(100:110,100)=1;
+  data(100:110,102)=1;
+  data(10,100:110)=0.3;
+  data(12,100:110)=0.3;
+  photon_number=1e2;
+  data=photon_number*data;
+  data_b=abs(ifft2(fft2(data).*(abs(fft2(psf,128,128)))));
+  data_n=poissrnd(data_b);
+
+  ## jvc deconvolution   function [ESTIMATED_OBJECT, ERROR] = jvcdeconv(IMAGE, PSF, TOL, MAX_ITER, RELAXATION_OPTION) 
+  MaxIter=100;
+  mse_bo_vs_rest_sqr=zeros(MaxIter,1);
+  mse_bo_vs_rest_abs=zeros(MaxIter,1);
+  mse_bo_vs_rest_cittert=zeros(MaxIter,1);
+  mse_no_vs_rest_sqr=zeros(MaxIter,1);
+  mse_no_vs_rest_abs=zeros(MaxIter,1);
+  mse_no_vs_rest_cittert=zeros(MaxIter,1);
+  ns="gaussian"; ## filtering
+  for i=1:MaxIter
+    [estimated_data_n_sqr error_data_n_sqr]=jvcdeconv(data_n,psf,"noise_filtering",ns,"relaxation","square","max_iter",i,"tol",1e-3);
+    [estimated_data_b_sqr error_data_b_sqr]=jvcdeconv(data_b,psf,"noise_filtering",ns,"relaxation","square","max_iter",i,"tol",1e-3); 
+    [estimated_data_n_abs error_data_n_abs]=jvcdeconv(data_n,psf,"noise_filtering",ns,"relaxation","abs","max_iter",i,"tol",1e-3);
+    [estimated_data_b_abs error_data_b_abs]=jvcdeconv(data_b,psf,"noise_filtering",ns,"relaxation","abs","max_iter",i,"tol",1e-3);
+    [estimated_data_n_cittert error_data_n_cittert]=jvcdeconv(data_n,psf,"noise_filtering",ns,"relaxation","cittert","max_iter",i,"tol",1e-3); 
+    [estimated_data_b_cittert error_data_b_cittert]= jvcdeconv(data_b,psf,"noise_filtering",ns,"relaxation","cittert","max_iter",i,"tol",1e-3);
+    mse_bo_vs_rest_sqr(i)=sumsq(data(:)-estimated_data_b_sqr(:));
+    mse_bo_vs_rest_abs(i)=sumsq(data(:)-estimated_data_b_abs(:));
+    mse_bo_vs_rest_cittert(i)=sumsq(data(:)-estimated_data_b_cittert(:));
+    mse_no_vs_rest_sqr(i)=sumsq(data(:)-estimated_data_n_sqr(:));
+    mse_no_vs_rest_abs(i)=sumsq(data(:)-estimated_data_n_abs(:));
+    mse_no_vs_rest_cittert(i)=sumsq(data(:)-estimated_data_n_cittert(:));  
+  endfor
+    disp("Data\t Min\t Max\t Sum")
+    disp(strcat("Or\t",num2str(min(data(:))),"\t",num2str(max(data(:))),"\t",num2str(sum(data(:)))))
+    disp(strcat("blur\t",num2str(min(data_b(:))),"\t",num2str(max(data_b(:))),"\t",num2str(sum(data_b(:)))))
+    disp(strcat("noisy\t",num2str(min(data_n(:))),"\t",num2str(max(data_n(:))),"\t",num2str(sum(data_n(:)))))
+    disp(strcat("sqr\t",num2str(min(estimated_data_b_sqr(:))),"\t",num2str(max(estimated_data_b_sqr(:))),"\t",num2str(sum(estimated_data_b_sqr(:)))))
+    disp(strcat("abs\t", num2str(min(estimated_data_b_abs(:))),"\t",num2str(max(estimated_data_b_abs(:))),"\t",num2str(sum(estimated_data_b_abs(:)))))
+    disp(strcat("citt\t", num2str(min(estimated_data_b_cittert(:))),"\t",num2str(max(estimated_data_b_cittert(:))),"\t",num2str(sum(estimated_data_b_cittert(:)))))
+
+    disp(strcat("sqr\t", num2str(min(estimated_data_n_sqr(:))),"\t",num2str(max(estimated_data_n_sqr(:))),"\t",num2str(sum(estimated_data_n_sqr(:)))))
+    disp(strcat("abs\t", num2str(min(estimated_data_n_abs(:))),"\t",num2str(max(estimated_data_n_abs(:))),"\t",num2str(sum(estimated_data_n_abs(:)))))
+    disp(strcat("citt\t", num2str(min(estimated_data_n_cittert(:))),"\t",num2str(max(estimated_data_n_cittert(:))),"\t",num2str(sum(estimated_data_n_cittert(:)))))
+
+    graphics_toolkit("gnuplot");
+    figure(1);
+    set(gcf,'Color',[.5,.5,.5]) 
+    subplot(4,4,1);  imshow(psf,[])
+    subplot(4,4,2);  imshow(data,[0 photon_number]); 
+    subplot(4,4,3);  imshow(data_b,[0 photon_number]);
+    subplot(4,4,4);  imshow(data_n,[0 photon_number]);
+    subplot(4,4,7);  imshow(estimated_data_b_sqr,[0 photon_number]); title("square")
+    subplot(4,4,8);  imshow(estimated_data_n_sqr,[0 photon_number]); title("square")
+    subplot(4,4,11);  imshow(estimated_data_b_abs,[0 photon_number]); title("abs")
+    subplot(4,4,12);  imshow(estimated_data_n_abs,[0 photon_number]); title("abs")
+    subplot(4,4,15);  imshow(estimated_data_b_cittert,[0 photon_number]); title("cittert")
+    subplot(4,4,16);  imshow(estimated_data_n_cittert,[0 photon_number]); title("cittert")
+    colormap(parula(256))
+
+    figure(2);
+    clf;
+    subplot(2,2,1)
+    plot(error_data_b_sqr,"r"); hold on;
+    plot(error_data_b_abs,"g");
+    plot(error_data_b_cittert,"b");hold off;
+    subplot(2,2,2)
+    plot(error_data_n_sqr,"r"); hold on;
+    plot(error_data_n_abs,"g");
+    plot(error_data_n_cittert,"b");hold off;
+    subplot(2,2,3)
+    plot(mse_bo_vs_rest_sqr,"r"); hold on;
+    plot(mse_bo_vs_rest_abs,"g");
+    plot(mse_bo_vs_rest_cittert,"b");hold off;
+    subplot(2,2,4)
+    plot(mse_no_vs_rest_sqr,"r"); hold on;
+    plot(mse_no_vs_rest_abs,"g");
+    plot(mse_no_vs_rest_cittert,"b");hold off;
+
+    #+END_SRC
+
+*** Restauración a partir de una versión de imagen en baja resolución
+    #+NAME: jvcdeconv-test-02
+    #+BEGIN_SRC octave :exports none :noweb yes :tangle ../octave/image-processing/jvcdeconv_test02.m :padline no
+ addpath(genpath("../../octave"))
+ <<gl-model-setup>>
+   m.n_col=51;
+   m.n_row=51;
+   m.n_lay=1;
+   m.pixel_size=7;
+   peak_shift=-1;
+   t_s=5;
+   m.image_formation = @(T_S,NORM,PEAK_SHIFT)generate_image_stack(@(XX,YY,ZZ)m.gl_psf_punctual(XX,YY,ZZ,T_S),...
+                                                                  m.pixel_size,m.pixel_size,m.delta_z,...
+                                                                  m.n_col,m.n_row,m.n_lay,NORM,peak_shift);
+   S_0=sum(m.image_formation(0,"none",0)(:));
+   psf=m.image_formation(t_s,"none",peak_shift)/S_0;
+   data=zeros(128);
+   data(32:95,32:95)=data(32:95,32:95)+ones(64);
+   data(48:79,48:79)=data(48:79,48:79)-ones(32);
+   data(100:110,100)=1;
+   data(100:110,102)=1;
+   data(10,100:110)=0.3;
+   data(12,100:110)=0.3;
+   data=100*data;
+   data_b=stationary_imaging(data,psf);
+   data_n=poissrnd(data_b);
+
+   ## jvc deconvolution   function [ESTIMATED_OBJECT, ERROR] = jvcdeconv(IMAGE, PSF, OPTIONS) 
+   MaxIter=1000;
+   [estimated_data_n,error_data_n]=jvcdeconv(data_n,psf,"relaxation","square","max_iter",MaxIter,"tol",1e-3);
+   [estimated_data_b,error_data_b]=jvcdeconv(data_b,psf,"relaxation","square","max_iter",MaxIter,"tol",1e-3); 
+   graphics_toolkit("gnuplot");
+   figure(1);
+   set(gcf,"Color",[.5,.5,.5]) 
+   subplot(2,3,1)
+   imshow(data,[])
+   subplot(2,3,2)
+   imshow(data_b,[]); 
+   subplot(2,3,3)
+   imshow(data_n,[]);
+   subplot(2,3,4)
+   imshow(psf,[]);
+   subplot(2,3,6)
+   imshow(estimated_data_n,[]);
+   subplot(2,3,5)
+   imshow(estimated_data_b,[]);
+
+   colormap(gray)
+   figure(2);
+   clf;
+   plot(error_data_n,"g"); hold on;
+   plot(error_data_b,"r"); hold off
+
+    #+END_SRC
+
+*** Prueba jvcdeconv en alta resolución a partir de imagen pixelada
+    #+NAME: jvcdeconv-test-03
+    #+BEGIN_SRC octave :exports none :noweb yes :tangle ../octave/image-processing/jvcdeconv_test03.m :padline no
+ addpath(genpath("../../octave"))
+ <<gl-model-setup>>
+   m.n_col=71;
+   m.n_row=71;
+   m.n_lay=1;
+   m.pixel_size=4.5;
+   peak_shift=0;
+   t_s=5;
+   m.image_formation = @(T_S,NORM,PEAK_SHIFT)generate_image_stack(@(XX,YY,ZZ)m.gl_psf_punctual(XX,YY,ZZ,T_S),...
+                                                                  m.pixel_size,m.pixel_size,m.delta_z,...
+                                                                  m.n_row,m.n_col,m.n_lay,"none",peak_shift);
+   S_0=sum(m.image_formation(0,0)(:));
+   psf=m.image_formation(t_s,peak_shift)/S_0;
+   data=zeros(128);
+   data(32:95,32:95)=data(32:95,32:95)+ones(64);
+   data(48:79,48:79)=data(48:79,48:79)-ones(32);
+   data(100:110,100)=1;
+   data(100:110,102)=1;
+   data(10,100:110)=0.3;
+   data(12,100:110)=0.3;
+   data=1000*data;
+   data_b=stationary_imaging(data,psf);
+   data_n=poissrnd(data_b);
+   ## pixelar
+   func=inline("sum(x(:))");
+   data_np=blockproc(data_n,[2 2],func);
+   data_bp=blockproc(data_b,[2 2],func);
+   ## despixelar
+   dfunc=inline("x(:).*ones(2)/4");
+   data_np_d=blockproc(data_np,[1 1],dfunc);
+   data_bp_d=blockproc(data_bp,[1 1],dfunc);
+
+   ## jvc deconvolution   function [ESTIMATED_OBJECT, ERROR] = jvcdeconv(IMAGE, PSF, OPTIONS) 
+   MaxIter=20;
+   [estimated_data_n,error_data_n]=jvcdeconv(data_n,psf,"relaxation","square","max_iter",MaxIter,"tol",1e-3);
+   [estimated_data_b,error_data_b]=jvcdeconv(data_b,psf,"relaxation","square","max_iter",MaxIter,"tol",1e-3); 
+
+   [estimated_data_np_d,error_data_n]=jvcdeconv(data_np_d,psf,"relaxation","square","max_iter",MaxIter,"tol",1e-3);
+   [estimated_data_bp_d,error_data_b]=jvcdeconv(data_bp_d,psf,"relaxation","square","max_iter",MaxIter,"tol",1e-3); 
+
+   graphics_toolkit("gnuplot");
+   figure(1);
+   clf;
+   set(gcf,"Color",[.5,.5,.5]) 
+   subplot(3,4,1);  imshow(data,[]);
+   subplot(3,4,2);  imshow(psf,[]);
+   subplot(3,4,5);  imshow(data_b,[]); 
+   subplot(3,4,6);  imshow(data_n,[]);
+   subplot(3,4,7);  imshow(data_bp_d,[]);
+   subplot(3,4,8);  imshow(data_np_d,[]);
+   subplot(3,4,9);  imshow(estimated_data_b,[]);
+   subplot(3,4,10); imshow(estimated_data_n,[]);
+   subplot(3,4,11); imshow(estimated_data_bp_d,[]); 
+   subplot(3,4,12); imshow(estimated_data_np_d,[]);
+
+   colormap(parula(256))
+   figure(2);
+   clf;
+   plot(error_data_n,"g"); hold on;
+   plot(error_data_b,"r"); hold off
+
+    #+END_SRC
+
+*** Prueba desconvolución 3D considerando psf estacionaria
+  #+NAME: jvcdeconv-test-04 
+  #+BEGIN_SRC octave :exports none :noweb yes :tangle ../octave/image-processing/jvcdeconv_test04.m
+  clear all;
+  more off;
+  addpath(genpath("../../octave"))
+  <<gl-model-setup>>
+  m.n_col=1;
+  m.n_row=31;
+  m.n_lay=51;
+  peak_shift=0;
+  t_s=0;
+
+  m.peak_formation = @(T_S,PS=0)generate_image_stack(@(XX,YY,ZZ)m.gl_psf_punctual(XX,YY,ZZ,T_S),m.pixel_size,m.pixel_size,m.delta_z,1,1,1,"none",PS);
+
+  m.image_formation = @(T_S,PS=0)generate_image_stack(@(XX,YY,ZZ)m.gl_psf_punctual(XX,YY,ZZ,T_S),...
+                				 m.pixel_size,m.pixel_size,m.delta_z,...
+                				 m.n_row,m.n_col,m.n_lay,"none",PS);
+
+  S_max=max(sum(sum(m.image_formation(0),1),2));
+  K=128;#número de secciones ópticas
+  psf_model=@(THETA_AUX,PS=0)m.image_formation(THETA_AUX,PS)/S_max;
+  data=zeros(128,1,K);
+  ## FANTOMAS
+  ## UN CUADRADO HUECO
+  ## data(32:95,1,32:95)=data(32:95,1,32:95)+ones(64,1,64);
+  ## data(48:79,1,48:79)=data(48:79,1,48:79)-ones(32,1,32);
+  ## DOS LINEAS PARALELAS AL EJE Y    
+  ##data(32:95,1,25)=ones(64,1,1);
+  ##data(32:95,1,100)=ones(64,1,1);
+  ## TRES ESFERAS HUECAS A TRES PROFUNDIDADES DISTINTAS
+  h_ring=intensity_ring(13,6);
+  data(22:34,1,42:54)=h_ring;
+  data(62:74,1,60:72)=h_ring;
+  data(102:114,1,80:92)=h_ring;
+  ## data(48:79,1,48:79)=data(48:79,1,48:79)-ones(32,1,32);   
+
+
+  ## número de fotones
+  data=2e4*data;
+
+  data_b=zeros(size(data));
+  imagen=zeros(size(data));
+  ## data_b=stationary_imaging(data,psf);
+  sum_psf_vec=zeros(m.n_lay,K);
+  t_s_vec=linspace(-7.5,20,K);
+  for k=fix(m.n_lay/2)+1:K-fix(m.n_lay/2)
+    tic;
+    [psf_aux, peak_shift]=m.peak_formation(t_s_vec(k));
+    psf=psf_model(t_s_vec(k),peak_shift);
+    sum_psf_vec(:,k)=sum(sum(psf,1),2);
+    data_b(:,:,k)=optical_section_imaging(data(:,:,k-fix(m.n_lay/2):k+fix(m.n_lay/2)),psf);
+    toc
+  endfor
+
+  k_idx=find(t_s_vec>=5)(1);
+  k_idx_0=find(t_s_vec>=0)(1)
+  imagen=data_b(:,:,k_idx);        
+  data_n=poissrnd(data_b);       
+  psf=psf_model(11); 
+  [deconvolved_b_image, mserrorb]=mldeconv(data_b,psf/sum(psf(:)),"max_iter",1000);
+  [deconvolved_n_image, mserrorn]=mldeconv(data_n,psf/sum(psf(:)),"max_iter",1000);
+   
+ 
+  graphics_toolkit("gnuplot")
+  figure 1;
+  clf;
+  subplot(2,3,1)
+  imagesc(t_s_vec,1:128,squeeze(data));hold on;
+  line([t_s_vec(k_idx_0) t_s_vec(k_idx_0)], [1 128],"color","white");hold off
+  subplot(2,3,2)
+  imagesc(squeeze(data_b))
+  subplot(2,3,3)
+  imagesc(poissrnd(squeeze(data_b)))
+  subplot(2,3,5)
+  imagesc(squeeze(deconvolved_b_image))
+  subplot(2,3,6)
+  imagesc(squeeze(deconvolved_n_image))
+
+  colormap(parula(256));
+  figure 2;
+  clf;
+  subplot(2,2,1)
+  plot(mserrorb)
+  subplot(2,2,2)
+  plot(mserrorn)
+
+    #+END_SRC
+
+*** Prueba desconvolución ruido poisson utilizando transformación de anscombe
+    #+NAME: jvcdeconv-test-05 
+    #+BEGIN_SRC octave :exports none :noweb yes :tangle ../octave/image-processing/jvcdeconv_test_05.m
+      clear all;
+      <<gl-model-setup>>
+      m.n_col=31;
+      m.n_row=31;
+      m.n_lay=1;
+      m.pixel_size=9;
+      peak_shift=0;
+      t_s=5;
+      m.image_formation = @(T_S,NORM)generate_image_stack(@(XX,YY,ZZ)m.gl_psf_punctual(XX,YY,ZZ,T_S),...
+                                                          m.pixel_size,m.pixel_size,m.delta_z,...
+                                                          m.n_row,m.n_col,m.n_lay,"none",peak_shift);
+      S_0=sum(m.image_formation(0)(:)); 
+      psf=m.image_formation(t_s,"none")/S_0;
+       data=zeros(128);
+      data_scale=linspace(-m.pixel_size*128/(2*m.M),m.pixel_size*128/(2*m.M),128);
+      data(32:95,32:95)=data(32:95,32:95)+ones(64);
+      data(48:79,48:79)=data(48:79,48:79)-ones(32);
+      lph=line_pattern([10 64],"horizontal");
+      lpv=line_pattern([64 10],"vertical");
+      data(13:22,32:95)=lph;
+      data(105:114,32:95)=fliplr(lph);
+      data(32:95,13:22)=flipud(lpv);
+      data(32:95,105:114)=lpv;
+      data(13:22,13:22)=1;
+      data(105:114,13:22)=0.75;
+      data(105:114,105:114)=0.5;
+      data(13:22,105:114)=0.25;
+      data(105:114,105:114)=0.5;
+      photon_number=200;
+      data=photon_number*data;
+      data_b=stationary_imaging(data,psf);
+      data_poisson=poissrnd(data_b);
+      graphics_toolkit("gnuplot");
+      for j=1:20
+        [data_jvcdeconv,jvc_se(j)]=jvcdeconv(data_poisson,psf,"noise_filtering","","max_iter",j);
+        [data_jvcdeconv_vst,jvc_se_vst(j)]=jvcdeconv(vst(data_poisson),psf,"noise_filtering","","max_iter",j);
+      endfor 
+      clf;
+      figure(1,"visible","on")
+      subplot(2,3,1)
+      imagesc(data_scale,data_scale,data);
+      subplot(2,3,2)
+      imagesc(data_scale,data_scale,data_b);
+      subplot(2,3,3)
+      imagesc(data_scale,data_scale,data_poisson);
+      subplot(2,3,5)
+      imagesc(data_scale,data_scale,data_jvcdeconv);
+      subplot(2,3,6)
+      imagesc(data_scale,data_scale,(data_jvcdeconv_vst/2).^2-3/8);
+      colormap(parula(photon_number));
+      figure(2,"visible","on")
+      clf
+      subplot(1,2,1); plot(jvc_se,"g");
+      subplot(1,2,2);plot(jvc_se_vst,"r");
+    #+END_SRC
+** Algoritmo de Gold
+*** Versión octave
+    #+NAME: gdeconv
+    #+BEGIN_SRC octave :exports none :tangle ../octave/image-processing/gdeconv.m :padline no
+      function [ESTIMATED_OBJECT, COMPARISON_VALUE] = gdeconv(IMAGE, PSF,varargin) 
+        ## usage: [ESTIMATED_OBJECT, COMPARISON_VALUE] = gdeconv(IMAGE, PSF, OPTIONS) 
+        ## Nonlinear Deconvolution Method
+        ## IMAGE is the acquired image
+        ## PSF is the point spread function of the microscope
+        ## TOL is the minimal error in the estimated object
+        ## MAX_ITER is the highest amount of iterations to be run if the specified tolerance value (TOL) has not been reached
+        ##
+        ## Returns 
+        ## ESTIMATED_OBJECT
+        ## SE is a vector containing the square error for the difference between IMAGE and the estimated image
+        ## Maintainer: Javier Eduardo Diaz Zamboni
+        ## Version: 0.1
+        ## Author: Javier Eduardo Diaz Zamboni
+        ## Created: 2017/02/21
+        options = struct("exponent",1,...
+    	             "max_iter",50,...
+    		     "tol",1e-3,...
+    		     "noise_filtering","gaussian",...
+    		     "iterations_per_filtering",1,...
+    		     "filter_size",3,...
+    		     "comparison","se",...
+    		     "gaussian_spread",0.4,...
+    		     "wiener_snr",100);
+
+        if ((nargin-2)==1)
+          options=test_function_options(options,varargin{1});
+        else
+          if ((nargin-2)>1)
+    	options=test_function_options(options,varargin);
+          endif
+        endif
+        switch options.comparison
+          case {"se"}
+          case {"idiv"}
+          otherwise
+    	error("%s is not a valid comparison method",options.comparison)
+        endswitch
+
+
+        im_size=size(IMAGE);
+        IMAGE_aux=IMAGE;
+        if (~strcmp(options.noise_filtering,""))
+          switch options.noise_filtering
+    	case {"wiener"}
+    	  IMAGE_aux=wdeconv((IMAGE),PSF/sum(PSF(:)),"snr",options.wiener_snr);
+    	case {"gaussian"}
+              if (im_size(1)>=options.filter_size)
+                rows=options.filter_size;
+              else
+                rows=im_size(1);
+              endif
+              if (im_size(2)>=options.filter_size)
+                cols=options.filter_size;
+              else
+                cols=im_size(2);
+              endif
+              w=fspecial("gaussian",[rows cols],options.gaussian_spread);
+              IMAGE_aux=abs(ifft2(fft2(IMAGE).*abs(fft2(w,im_size(1),im_size(2)))));
+    	otherwise
+    	  error("'%s' is an invalid value for NOISE_FILTERING",options.noise_filtering)
+          endswitch
+        endif
+
+        ESTIMATED_OBJECT = zeros(size(IMAGE));
+        current_estimated_obj = zeros(size(IMAGE));
+        next_estimated_obj = IMAGE_aux;
+        estimated_image = zeros(size(IMAGE));
+        SE = 1e6*ones(1, options.max_iter);
+        reached_TOL = false;
+        iter = 1;
+        while ((iter <= options.max_iter) && (reached_TOL!=true))
+          current_estimated_obj = next_estimated_obj;
+          estimated_image = stationary_imaging(current_estimated_obj,PSF);
+          next_estimated_obj = current_estimated_obj.*(IMAGE./estimated_image).^options.exponent;
+
+          ## filtering
+
+          if (~(strcmp(options.noise_filtering,""))&&(mod(iter,options.iterations_per_filtering)==0))
+    	switch options.noise_filtering
+    	  case {"wiener"}
+    	    next_estimate_obj=wdeconv(next_estimated_obj,PSF/sum(PSF(:)),"snr",options.wiener_snr);
+    	  case {"gaussian"}
+                next_estimated_obj=abs(ifft2(fft2(next_estimated_obj).*abs(fft2(w,im_size(1),im_size(2)))));
+    	endswitch
+          endif
+          switch options.comparison
+    	case {"se"}
+    	  COMPARISON_VALUE = sumsq(IMAGE(:)-estimated_image(:));
+    	case {"idiv"}
+    	  COMPARISON_VALUE = i_divergence(IMAGE(:),estimated_image(:));
+    	otherwise
+    	  error("%s is not a valid comparison method",options.comparison)
+          endswitch
+          iter += 1;
+        endwhile
+        ESTIMATED_OBJECT = next_estimated_obj;
+      endfunction
+    #+END_SRC
+
+    #+NAME: gdeconv-test-01
+    #+BEGIN_SRC octave :exports none :noweb yes :tangle ../octave/image-processing/gdeconv_test.m :padline no
+  addpath(genpath("../../octave"))
+  <<gl-model-setup>>
+  m.n_col=51;
+  m.n_row=51;
+  m.n_lay=1;
+  m.pixel_size=13;
+  peak_shift=-1.0;
+  t_s=5;
+  m.image_formation = @(T_S,NORM)generate_image_stack(@(XX,YY,ZZ)m.gl_psf_punctual(XX,YY,ZZ,T_S),...
+                                                      m.pixel_size,m.pixel_size,m.delta_z,...
+                                                      m.n_row,m.n_col,m.n_lay,NORM,peak_shift);
+
+  S_0=sum(m.image_formation(0,"none")(:));
+  psf=m.image_formation(t_s,"none")/S_0;
+  data=zeros(128);
+  data(32:95,32:95)=data(32:95,32:95)+ones(64);
+  data(48:79,48:79)=data(48:79,48:79)-ones(32);
+  data(100:110,100)=1;
+  data(100:110,102)=1;
+  data(10,100:110)=0.3;
+  data(12,100:110)=0.3;
+  data=100*data;
+  data_b=abs(ifft2(fft2(data).*(abs(fft2(psf,128,128)))));
+  data_n=poissrnd(data_b)+poissrnd(25*ones(size(data)));
+
+  MaxIter=100;
+  [estimated_data_n error_data_n]=gdeconv(data_n,psf,"max_iter",MaxIter,"tol",1e-3); 
+  [estimated_data_b error_data_b]=gdeconv(data_b,psf,"max_iter",MaxIter,"tol",1e-3); 
+
+  graphics_toolkit("gnuplot");
+  figure(1);
+  set(gcf,'Color',[.5,.5,.5]) 
+  subplot(2,4,1);  imshow(psf,[])
+  subplot(2,4,2);  imshow(data,[]); 
+  subplot(2,4,3);  imshow(data_b,[]);
+  subplot(2,4,4);  imshow(data_n,[]);
+  subplot(2,4,7);  imshow(estimated_data_b,[]); title("blurred")
+  subplot(2,4,8);  imshow(estimated_data_n,[]); title("blurred and noisy")
+
+  colormap(gray)
+  figure(2);
+  clf;
+  plot(error_data_b,"r"); hold on;
+  plot(error_data_n,"b");hold off;
+    #+END_SRC
+
+    #+NAME: gdeconv-test-02
+    #+BEGIN_SRC octave :exports none :noweb yes :tangle ../octave/image-processing/gdeconv_test_02.m :padline no
+    addpath(genpath("../../octave"))
+    <<gl-model-setup>>
+    m.n_col=51;
+    m.n_row=51;
+    m.n_lay=1;
+    m.pixel_size=13;
+    peak_shift=-1.0;
+    t_s=5;
+    m.image_formation = @(T_S,NORM)generate_image_stack(@(XX,YY,ZZ)m.gl_psf_punctual(XX,YY,ZZ,T_S),...
+                                                      m.pixel_size,m.pixel_size,m.delta_z,...
+                                                      m.n_row,m.n_col,m.n_lay,NORM,peak_shift);
+
+    S_0=sum(m.image_formation(0,"none")(:));
+    psf=m.image_formation(t_s,"none")/S_0;
+    data=zeros(128);
+    data(32:95,32:95)=data(32:95,32:95)+ones(64);
+    data(48:79,48:79)=data(48:79,48:79)-ones(32);
+    data(100:110,100)=1;
+    data(100:110,102)=1;
+    data(10,100:110)=0.3;
+    data(12,100:110)=0.3;
+    data=100*data;
+    data_b=abs(ifft2(fft2(data).*(abs(fft2(psf,128,128)))));
+    data_n=poissrnd(data_b)+poissrnd(25*ones(size(data)));
+
+    MaxIter=100;
+    [estimated_data_n error_data_n]=gdeconv(data_n,psf,"max_iter",MaxIter,"tol",1e-3); 
+    [estimated_data_b error_data_b]=gdeconv(data_b,psf,"max_iter",MaxIter,"tol",1e-3); 
+
+    graphics_toolkit("gnuplot");
+    figure(1);
+    set(gcf,'Color',[.5,.5,.5]) 
+    subplot(2,4,1);  imshow(psf,[])
+    subplot(2,4,2);  imshow(data,[]); 
+    subplot(2,4,3);  imshow(data_b,[]);
+    subplot(2,4,4);  imshow(data_n,[]);
+    subplot(2,4,7);  imshow(estimated_data_b,[]); title("blurred")
+    subplot(2,4,8);  imshow(estimated_data_n,[]); title("blurred and noisy")
+    
+    colormap(gray)
+    figure(2);
+    clf;
+    plot(error_data_b,"r"); hold on;
+    plot(error_data_n,"b");hold off;
+    #+END_SRC
+
+    #+NAME: grestore
+    #+BEGIN_SRC octave :exports none :tangle ../octave/image-processing/grestore.m :padline no
+      function [ESTIMATED_OBJECT, COMPARISON_VALUE] = grestore(IMAGE, FORWARD_MODEL,varargin) 
+        ## usage: [ESTIMATED_OBJECT, COMPARISON_VALUE] = grestore(IMAGE, FORWARD_MODEL,OPTIONS) 
+        ## Nonlinear Restoration Method
+        ## IMAGE is the acquired image
+        ## FORWARD_MODEL
+        ## TOL is the minimal error in the estimated object
+        ## MAX_ITER is the highest amount of iterations to be run if the specified tolerance value (TOL) has not been reached
+        ##
+        ## Returns 
+        ## ESTIMATED_OBJECT
+        ## SE is a vector containing the square error for the difference between IMAGE and the estimated image
+        ## Maintainer: Javier Eduardo Diaz Zamboni
+        ## Version: 0.1
+        ## Author: Javier Eduardo Diaz Zamboni
+        ## Created: 2017/02/21
+        options = struct("exponent",1,...
+	                 "max_iter",50,...
+			 "tol",1e-3,...
+			 "noise_filtering","gaussian",...
+			 "iterations_per_filtering",1,...
+			 "filter_size",3,...
+			 "comparison","se",...
+			 "gaussian_spread",0.4,...
+			 "wiener_snr",100);
+
+        if ((nargin-2)==1)
+          options=test_function_options(options,varargin{1});
+        else
+          if ((nargin-2)>1)
+    	options=test_function_options(options,varargin);
+          endif
+        endif
+        switch options.comparison
+          case {"se"}
+          case {"idiv"}
+          otherwise
+    	error("%s is not a valid comparison method",options.comparison)
+        endswitch
+        warning ("off", "Octave:broadcast");
+
+        im_size=size(IMAGE);
+        IMAGE_aux=IMAGE;
+        if (~strcmp(options.noise_filtering,""))
+          switch options.noise_filtering
+    	case {"gaussian"}
+              if (im_size(1)>=options.filter_size)
+                rows=options.filter_size;
+              else
+                rows=im_size(1);
+              endif
+              if (im_size(2)>=options.filter_size)
+                cols=options.filter_size;
+              else
+                cols=im_size(2);
+              endif
+              w=fspecial("gaussian",[rows cols],options.gaussian_spread);
+              IMAGE=abs(ifft2(fft2(IMAGE).*abs(fft2(w,im_size(1),im_size(2)))));
+    	otherwise
+    	  error("'%s' is an invalid value for NOISE_FILTERING",options.noise_filtering)
+          endswitch
+        endif
+
+        ESTIMATED_OBJECT = zeros(size(IMAGE));
+        current_estimated_obj = zeros(size(IMAGE));
+        next_estimated_obj = IMAGE_aux;
+        estimated_image = zeros(size(IMAGE));
+        SE = 1e6*ones(1, options.max_iter);
+        reached_TOL = false;
+        iter = 1;
+        while ((iter <= options.max_iter) && (reached_TOL!=true))
+          current_estimated_obj = next_estimated_obj;
+          estimated_image = FORWARD_MODEL(current_estimated_obj);
+
+          next_estimated_obj = current_estimated_obj.*(IMAGE./estimated_image).^options.exponent;
+
+          ## filtering
+
+          if (~(strcmp(options.noise_filtering,""))&&(mod(iter,options.iterations_per_filtering)==0))
+    	switch options.noise_filtering
+    	  case {"gaussian"}
+                next_estimated_obj=abs(ifft2(fft2(next_estimated_obj).*abs(fft2(w,im_size(1),im_size(2)))));
+    	endswitch
+          endif
+          switch options.comparison
+    	case {"se"}
+    	  COMPARISON_VALUE = sumsq(IMAGE(:)-estimated_image(:));
+    	case {"idiv"}
+    	  COMPARISON_VALUE = i_divergence(IMAGE(:),estimated_image(:));
+    	otherwise
+    	  error("%s is not a valid comparison method",options.comparison)
+          endswitch
+          iter += 1;
+        endwhile
+        warning ("on", "Octave:broadcast");
+        ESTIMATED_OBJECT = next_estimated_obj;
+      endfunction
+    #+END_SRC
+
+*** Prueba gdeconv en alta resolución a partir de imagen pixelada
+    #+NAME: gdeconv-test02
+    #+BEGIN_SRC octave :exports none :noweb yes :tangle ../octave/image-processing/gdeconv_test_03.m :padline no
+      addpath(genpath("../../octave"))
+      <<gl-model-setup>>
+      m.n_col=51;
+      m.n_row=51;
+      m.n_lay=1;
+      m.pixel_size=4.5;
+      peak_shift=-0.2;
+      t_s=5;
+      m.image_formation = @(T_S,NORM,PEAK_SHIFT)generate_image_stack(@(XX,YY,ZZ)m.gl_psf_punctual(XX,YY,ZZ,T_S),...
+    								 m.pixel_size,m.pixel_size,m.delta_z,...
+    								 m.n_col,m.n_row,m.n_lay,"none",peak_shift);
+      S_0=sum(m.image_formation(0,0)(:));
+      psf=m.image_formation(t_s,peak_shift)/S_0;
+      data=zeros(128);
+      data(32:95,32:95)=data(32:95,32:95)+ones(64);
+      data(48:79,48:79)=data(48:79,48:79)-ones(32);
+      data(100:110,100)=1;
+      data(100:110,102)=1;
+      data(10,100:110)=0.3;
+      data(12,100:110)=0.3;
+      data=1000*data;
+      data_b=stationary_imaging(data,psf);
+      data_n=poissrnd(data_b);
+      ## pixelar
+      func=inline("sum(x(:))");
+      data_np=blockproc(data_n,[2 2],func);
+      data_bp=blockproc(data_b,[2 2],func);
+      ## despixelar
+      dfunc=inline("x(:).*ones(2)");
+      data_np_d=blockproc(data_np,[1 1],dfunc);
+      data_bp_d=blockproc(data_bp,[1 1],dfunc);
+
+
+      MaxIter=10;
+      [estimated_data_n,error_data_n]=gdeconv(data_n,psf,"max_iter",MaxIter,"tol",1e-3);
+      [estimated_data_b,error_data_b]=gdeconv(data_b,psf,"max_iter",MaxIter,"tol",1e-3); 
+
+      [estimated_data_np_d,error_data_n]=gdeconv(data_np_d,psf,"max_iter",MaxIter,"tol",1e-3);
+      [estimated_data_bp_d,error_data_b]=gdeconv(data_bp_d,psf,"max_iter",MaxIter,"tol",1e-3); 
+
+      graphics_toolkit("gnuplot");
+      figure(1);
+      clf;
+      set(gcf,"Color",[.5,.5,.5]) 
+      subplot(3,4,1);  imshow(data,[]);
+      subplot(3,4,2);  imshow(psf,[]);
+      subplot(3,4,5);  imshow(data_b,[]); 
+      subplot(3,4,6);  imshow(data_n,[]);
+      subplot(3,4,7);  imshow(data_bp_d,[]);
+      subplot(3,4,8);  imshow(data_np_d,[]);
+      subplot(3,4,9);  imshow(estimated_data_b,[]);
+      subplot(3,4,10); imshow(estimated_data_n,[]);
+      subplot(3,4,11); imshow(estimated_data_bp_d,[]); 
+      subplot(3,4,12); imshow(estimated_data_np_d,[]);
+
+      colormap(parula(256))
+      figure(2);
+      clf;
+      plot(error_data_n,"g"); hold on;
+      plot(error_data_b,"r"); hold off
+
+    #+END_SRC
+
+** Algoritmo de Máxima Verosimilitud asumiendo ruido con distribución Poisson en la señal 
+*** Versión octave
+    #+NAME: mldeconv
+    #+BEGIN_SRC octave :exports none :tangle ../octave/image-processing/mldeconv.m :padline no
+      function [ESTIMATED_OBJECT, COMPARISON_VALUE] = mldeconv(IMAGE, PSF,varargin) 
+        ## usage: [ESTIMATED_OBJECT, COMPARISON_VALUE] = mldeconv(IMAGE, PSF, P, TOL, MAX_ITER) 
+        ## Maximum Likelihood - Nonlinear Deconvolution Method
+        ## IMAGE is the acquired image
+        ## PSF is the point spread function of the microscope
+        ## TOL is the minimal error in the estimated object
+        ## MAX_ITER is the highest amount of iterations to be run if the specified tolerance value (TOL) has not been reached
+        ## P is the exponent of the image fraction P=1 is Lucy-Richardson algorithm
+        ## Returns 
+        ## ESTIMATED_OBJECT
+        ## COMPARISON_VALUE is the scalar value of the image comparison criteria
+        ## used. Square error is the default criteria.
+        ## Author: Javier Eduardo Diaz Zamboni
+        ## Created: 2016/06/01
+        ## Version: 0.1
+        options = struct("exponent",1,...
+            	     "max_iter",50,...
+                     "tol",1e-3,...
+            	     "noise_filtering","gaussian",...
+    		     "iterations_per_filtering",1,...
+    		     "filter_size",3,...
+            	     "comparison","se",...
+		     "gaussian_spread",0.4,...
+		     "wiener_snr",100);
+        if ((nargin-2)==1)
+          options=test_function_options(options,varargin{1});
+        else
+          if ((nargin-2)>1)
+    	options=test_function_options(options,varargin);
+          endif
+        endif
+        switch options.comparison
+          case {"se"}
+          case {"idiv"}
+          otherwise
+    	error("%s is not a valid comparison method",options.comparison)
+        endswitch
+
+        im_size=size(IMAGE);
+        ESTIMATED_OBJECT = zeros(im_size);
+        current_estimated_obj = zeros(im_size);
+        next_estimated_obj = zeros(im_size);
+        estimated_image = zeros(im_size);
+        reached_TOL = false;
+        PSF_flipped=flipdim(PSF,3);
+        IMAGE_aux=IMAGE;
+        if (~strcmp(options.noise_filtering,""))
+          switch options.noise_filtering
+    	case {"wiener"}
+    	  IMAGE_aux=wdeconv((IMAGE),PSF/sum(PSF(:)),"snr",options.wiener_snr);
+    	case {"gaussian"}
+              if (im_size(1)>=options.filter_size)
+                rows=options.filter_size;
+              else
+                rows=im_size(1);
+              endif
+              if (im_size(2)>=options.filter_size)
+                cols=options.filter_size;
+              else
+                cols=im_size(2);
+              endif
+              w=fspecial("gaussian",[rows cols],options.gaussian_spread);
+              IMAGE_aux=abs(ifft2(fft2(IMAGE).*abs(fft2(w,im_size(1),im_size(2)))));
+    	otherwise
+    	  error("'%s' is an invalid value for NOISE_FILTERING",options.noise_filtering)
+          endswitch
+        endif
+
+        iter = 1;
+        while ((iter <= options.max_iter) && (reached_TOL!=true))
+          if (iter == 1)
+    	current_estimated_obj = IMAGE_aux;
+          else
+    	current_estimated_obj = next_estimated_obj;
+          endif
+
+          estimated_image=stationary_imaging(current_estimated_obj,PSF);
+          image_frac=IMAGE./estimated_image;
+          next_estimated_obj=current_estimated_obj.*(abs(stationary_imaging(image_frac,PSF_flipped))).^options.exponent;
+
+          ## filtering
+
+          if (~(strcmp(options.noise_filtering,""))&&(mod(iter,options.iterations_per_filtering)==0))
+    	switch options.noise_filtering
+              case {"wiener"}
+                next_estimate_obj=wdeconv(next_estimated_obj,PSF/sum(PSF(:)),"snr",options.wiener_snr);
+              case {"gaussian"}
+                next_estimated_obj=abs(ifft2(fft2(next_estimated_obj).*abs(fft2(w,im_size(1),im_size(2)))));
+    	endswitch
+          endif
+
+          switch options.comparison
+    	case {"se"}
+              COMPARISON_VALUE = sumsq(IMAGE(:)-estimated_image(:));
+    	case {"idiv"}
+              COMPARISON_VALUE = i_divergence(IMAGE(:),estimated_image(:));
+    	otherwise
+    	  error("%s is not a valid comparison method",options.comparison)
+          endswitch
+
+          iter +=1;
+
+        endwhile
+
+        ESTIMATED_OBJECT = next_estimated_obj;
+
+      endfunction
+
+    #+END_SRC
+
+    #+NAME: mldeconv-test
+    #+BEGIN_SRC octave :results output :exports none :noweb yes :tangle ../octave/image-processing/mldeconv_test.m
+addpath(genpath("../../octave"));
+  <<gl-model-setup>>
+  m.n_col=31;
+  m.n_row=31;
+  m.n_lay=1;
+  m.pixel_size=13;
+  peak_shift=-1.0;
+  t_s=5;
+  m.image_formation = @(T_S,NORM)generate_image_stack(@(XX,YY,ZZ)m.gl_psf_punctual(XX,YY,ZZ,T_S),...
+                                                      m.pixel_size,m.pixel_size,m.delta_z,...
+                                                      m.n_row,m.n_col,m.n_lay,NORM,peak_shift);
+  S_0=sum(m.image_formation(0,"none")(:));
+  psf=m.image_formation(t_s,"none")/S_0;
+  data=zeros(128);
+  data(32:95,32:95)=data(32:95,32:95)+ones(64);
+  data(48:79,48:79)=data(48:79,48:79)-ones(32);
+  data(100:110,100)=1;
+  data(100:110,102)=1;
+  data(10,100:110)=0.3;
+  data(12,100:110)=0.3;
+  data=100*data;
+  data_b=abs(ifft2(fft2(data).*(abs(fft2(psf,128,128)))));
+  data_n=poissrnd(data_b);
+  ## ml deconvolution   function [ESTIMATED_OBJECT ERROR] = mldeconv(IMAGE, PSF,"exponent",P, "max_iter",MAX_ITER,"tol",1e-3) 
+  P=0.5;
+  MaxIter=50;
+  mse_bo_vs_rest=zeros(MaxIter,1);
+  mse_no_vs_rest=zeros(MaxIter,1);
+  for i=1:MaxIter
+  [estimated_data_n error_data_n]=mldeconv(data_n,psf,"exponent",P, "max_iter",i,"tol",1e-3); 
+  [estimated_data_b error_data_b]=mldeconv(data_b,psf,"exponent",P, "max_iter",i,"tol",1e-3); 
+   mse_bo_vs_rest(i)=sumsq(data(:)-estimated_data_b(:));
+   mse_no_vs_rest(i)=sumsq(data(:)-estimated_data_n(:));
+
+  endfor
+  graphics_toolkit("gnuplot");
+  figure(1);
+  clf;
+  set(gcf,'Color',[.5,.5,.5]) 
+  subplot(2,3,1)
+  imshow(data,[])
+  subplot(2,3,2)
+  imshow(data_b,[]); 
+  subplot(2,3,3)
+  imshow(data_n,[]);
+  subplot(2,3,6)
+  imshow(estimated_data_n,[]);
+  subplot(2,3,5)
+  imshow(estimated_data_b,[]);
+  colormap(gray)
+  figure(2);
+  subplot(2,1,1)
+  plot(error_data_n,"g"); hold on;
+  plot(error_data_b,"r"); hold off
+  subplot(2,1,2)
+  plot(mse_bo_vs_rest,"g"); hold on;
+  plot(mse_no_vs_rest,"r"); hold off
+    #+END_SRC
+
+*** Prueba mldeconv en alta resolución a partir de imagen pixelada
+    #+NAME: mldeconv-test-02
+    #+BEGIN_SRC octave :exports none :noweb yes :tangle ../octave/image-processing/mldeconv_test02.m :padline no
+      addpath(genpath("../../octave"))
+      <<gl-model-setup>>
+      m.n_col=51;
+      m.n_row=51;
+      m.n_lay=1;
+      m.pixel_size=4.5;
+      peak_shift=-0.5;
+      t_s=5;
+      m.image_formation = @(T_S,NORM,PEAK_SHIFT)generate_image_stack(@(XX,YY,ZZ)m.gl_psf_punctual(XX,YY,ZZ,T_S),...
+    								 m.pixel_size,m.pixel_size,m.delta_z,...
+    								 m.n_col,m.n_row,m.n_lay,"none",peak_shift);
+      S_0=sum(m.image_formation(0,0)(:));
+      psf=m.image_formation(t_s,peak_shift)/S_0;
+      data=zeros(128);
+      data(32:95,32:95)=data(32:95,32:95)+ones(64);
+      data(48:79,48:79)=data(48:79,48:79)-ones(32);
+      data(100:110,100)=1;
+      data(100:110,102)=1;
+      data(10,100:110)=0.3;
+      data(12,100:110)=0.3;
+      data=1000*data;
+      data_b=stationary_imaging(data,psf);
+      data_n=poissrnd(data_b);
+      ## pixelar
+      func=inline("sum(x(:))");
+      data_np=blockproc(data_n,[2 2],func);
+      data_bp=blockproc(data_b,[2 2],func);
+      ## despixelar
+      dfunc=inline("x(:).*ones(2)/4");
+      data_np_d=blockproc(data_np,[1 1],dfunc);
+      data_bp_d=blockproc(data_bp,[1 1],dfunc);
+
+
+      MaxIter=100;
+      [estimated_data_n,error_data_n]=mldeconv(data_n,psf,"exponent",1,"max_iter",MaxIter,"tol",1e-3);
+      [estimated_data_b,error_data_b]=mldeconv(data_b,psf,"exponent",1,"max_iter",MaxIter,"tol",1e-3); 
+
+      [estimated_data_np_d,error_data_np_d]=mldeconv(data_np_d,psf,"exponent",1,"max_iter",MaxIter,"tol",1e-3);
+      [estimated_data_bp_d,error_data_bp_d]=mldeconv(data_bp_d,psf,"exponent",1,"max_iter",MaxIter,"tol",1e-3); 
+
+      graphics_toolkit("gnuplot");
+      figure(1);
+      clf;
+      set(gcf,"Color",[.5,.5,.5]) 
+      subplot(3,4,1);  imshow(data,[]);
+      subplot(3,4,2);  imshow(psf,[]);
+      subplot(3,4,5);  imshow(data_b,[]); 
+      subplot(3,4,6);  imshow(data_n,[]);
+      subplot(3,4,7);  imshow(data_bp_d,[]);
+      subplot(3,4,8);  imshow(data_np_d,[]);
+      subplot(3,4,9);  imshow(estimated_data_b,[]);
+      subplot(3,4,10); imshow(estimated_data_n,[]);
+      subplot(3,4,11); imshow(estimated_data_bp_d,[]); 
+      subplot(3,4,12); imshow(estimated_data_np_d,[]);
+
+      colormap(parula(256))
+      figure(2);
+      clf;
+      subplot(2,2,1)
+      plot(error_data_n,"g"); hold on;
+      plot(error_data_b,"r"); hold off
+      subplot(2,2,2)
+      plot(error_data_np_d,"g"); hold on;
+      plot(error_data_bp_d,"r"); hold off
+    #+END_SRC
+
+** Algoritmos blind
+*** Version octave
+    #+NAME: bdeconv
+    #+BEGIN_SRC octave :exports none :tangle ../octave/image-processing/bdeconv.m :padline no
+    function [ESTIMATED_OBJECT PSF_PARAMETERS MSE] = bdeconv(IMAGE, PSF, THETA_INI, P,TOL, MAX_ITER) 
+    ## usage: [ESTIMATED_OBJECT PSF_PARAMETERS MSE] = bdeconv(IMAGE, PSF, THETA_INI,P,TOL, MAX_ITER) 
+    ## Blind Deconvolution by Maximum Likelihood
+    ## IMAGE is the acquired image
+    ## PSF is an estimate of point spread function of the microscope
+    ## TOL is the minimal error in the estimated object
+    ## MAX_ITER is the highest amount of iterations to be run if the specified tolerance value (TOL) has not been reached
+    ## P is the exponent of the image fraction P=1 is Lucy-Richardson algorithm
+    ## Returns 
+    ## ESTIMATED_OBJECT
+    ## ERROR is a vector showing the error for the estimated object
+    ## Author: Javier Eduardo Diaz Zamboni
+    ## Created: 2016/06/01
+    ## Version: 0.1
+
+    ESTIMATED_OBJECT = zeros(size(IMAGE));
+    current_estimated_obj = zeros(size(IMAGE));
+    next_estimated_obj = zeros(size(IMAGE));
+    estimated_image = zeros(size(IMAGE));
+    MSE = 1e6*ones(1, MAX_ITER);
+    reached_TOL = false;
+    model=@(OBJECT,THETA_AUX)stationary_imaging(OBJECT,PSF(THETA_AUX))+1;
+    PSF_PARAMETERS=THETA_INI;
+  
+    iter = 1;
+    REPEAT=5;
+    while ((iter <= MAX_ITER) && (reached_TOL!=true))
+      if (iter == 1)
+        current_estimated_obj = IMAGE;
+      else
+        current_estimated_obj = next_estimated_obj;
+      endif
+
+      ## PSF parameter estimation
+      ## [THETA_EST ITERS THETA_CONV TIME]=fit_psf(DATA,MODEL,THETA_INI,METHOD,MAX_ITER=20,TOL=1e-3,H=0.001)
+      ## object estimation 
+      estimated_image=stationary_imaging(current_estimated_obj,PSF(PSF_PARAMETERS));
+      image_frac=IMAGE./estimated_image;
+      next_estimated_obj=current_estimated_obj.*(abs(stationary_imaging(image_frac,PSF(PSF_PARAMETERS))).^P);
+      next_estimated_obj=imsmooth(next_estimated_obj,"gaussian",0.45);
+      if (rem(iter,REPEAT)==0)
+	fit_psf_tol=sqrt(crlb_poisson(@(aux)(max(IMAGE(:))*PSF(aux)),PSF_PARAMETERS))	
+        [PSF_PARAMETERS ITERS THETA_CONV TIME]=fit_psf(IMAGE,@(THETA_AUX)model(current_estimated_obj,THETA_AUX), PSF_PARAMETERS,"ml",fit_psf_tol);
+	THETA_CONV
+      endif
+    
+      MSE(iter) = sumsq(IMAGE(:)-estimated_image(:))/prod(size(IMAGE)); 
+
+    
+      if (MSE(iter)<=TOL)
+        reached_TOL = true;
+        MSE = MSE(1:iter);
+      endif
+
+      iter +=1;
+    
+    endwhile
+
+    ESTIMATED_OBJECT =next_estimated_obj;
+
+  endfunction
+
+    #+END_SRC
+    
+    #+NAME: bdeconv-test
+    #+BEGIN_SRC octave :results output :exports none :noweb yes :tangle ../octave/image-processing/bdeconv_test.m
+  addpath(genpath("../../octave"))
+  <<gl-model-setup>>
+  m.n_col=19;
+  m.n_row=19;
+  m.n_lay=1;
+  peak_shift=-1;
+  t_s=5;
+  m.image_formation = @(T_S,NORM)generate_image_stack(@(XX,YY,ZZ)m.gl_psf_punctual(XX,YY,ZZ,T_S),...
+                                                      m.pixel_size,m.pixel_size,m.delta_z,...
+                                                      m.n_col,m.n_row,m.n_lay,NORM,peak_shift);
+  S_0=sum(m.image_formation(0,"none")(:));
+  psf=m.image_formation(t_s,"none")/S_0;
+  psf_model=@(THETA_AUX)m.image_formation(THETA_AUX,"none")/S_0;
+  data=zeros(128);
+  data(32:95,32:95)=data(32:95,32:95)+ones(64);
+  data(48:79,48:79)=data(48:79,48:79)-ones(32);
+  data=1e3*data;
+  data_b=stationary_imaging(data,psf);
+  data_n=poissrnd(data_b);
+
+  t_s_ini=4.9;
+
+  MaxIter=50;
+  P=1;
+  ##function [ESTIMATED_OBJECT PSF_PARAMETERS MSE] = bdeconv(IMAGE, PSF, THETA_INI, P, TOL, MAX_ITER) 
+  [estimated_data_b params error_data_b]=bdeconv(data_b,psf_model,t_s_ini,P,1e-3,MaxIter); 
+  [estimated_data_n params error_data_n]=bdeconv(data_n,psf_model,t_s_ini,P,1e-3,MaxIter); 
+ 
+  graphics_toolkit("gnuplot");
+  figure(1);
+  set(gcf,'Color',[.5,.5,.5]) 
+  subplot(2,3,1)
+  imshow(squeeze(data),[])
+  subplot(2,3,2)
+  imshow(squeeze(data_b),[]); 
+  subplot(2,3,3)
+  imshow(squeeze(data_n),[]);
+  subplot(2,3,5)
+  imshow(squeeze(estimated_data_b),[]);
+  subplot(2,3,6)
+  imshow(squeeze(estimated_data_n),[]);
+
+  colormap(gray)
+  figure(2);
+  plot(error_data_n,"g"); hold on;
+  plot(error_data_b,"r"); hold off
+
+    #+END_SRC
+
+    #+NAME: bdeconv2
+    #+BEGIN_SRC octave :exports none :tangle ../octave/image-processing/bdeconv2.m :padline no
+    function [ESTIMATED_OBJECT PSF_PARAMETERS MSE] = bdeconv2(IMAGE, PSF, THETA_INI,TOL, MAX_ITER) 
+    ## usage: [ESTIMATED_OBJECT PSF_PARAMETERS MSE] = bdeconv2(IMAGE, PSF, THETA_INI, TOL, MAX_ITER) 
+    ## Blind Janson Van Cittert's algorithm - Nonlinear Deconvolution Method
+    ## IMAGE is the acquired image
+    ## PSF is the point spread function of the microscope
+    ## THETA_INI intial estimates of PSF's parameters
+    ## TOL is the minimal error in the estimated object
+    ## MAX_ITER is the highest amount of iterations to be run if the specified tolerance value (TOL) has not been reached
+    ##
+    ## Returns 
+    ## ESTIMATED_OBJECT
+    ## ERROR is a vector showing the error for the estimated object
+
+    ESTIMATED_OBJECT = zeros(size(IMAGE));
+    current_estimated_obj = zeros(size(IMAGE));
+    next_estimated_obj = zeros(size(IMAGE));
+    estimated_image = zeros(size(IMAGE));
+    MSE = 1e6*ones(1, MAX_ITER);
+    reached_TOL = false;
+    model=@(OBJECT,THETA_AUX)stationary_imaging(OBJECT,PSF(THETA_AUX));
+    PSF_PARAMETERS=THETA_INI;
+
+    A = max(IMAGE(:))/2;
+    iter = 1;
+    REPEAT=5;
+    while ((iter <= MAX_ITER) && (reached_TOL!=true))
+      if (iter == 1)
+        current_estimated_obj = IMAGE;
+      else
+        current_estimated_obj = next_estimated_obj;
+      endif
+    
+      estimated_image = stationary_imaging(current_estimated_obj,PSF(PSF_PARAMETERS));
+    
+      gamma = 1 - (estimated_image - A).^2 ./ (A^2);
+      next_estimated_obj = current_estimated_obj + gamma .* (IMAGE-estimated_image);
+      next_estimated_obj(next_estimated_obj< 0) = 0; # Restriccion de positividad
+      MSE(iter) = sumsq(IMAGE(:)-estimated_image(:))/prod(size(IMAGE));
+    
+      ## PSF parameter estimation
+      ## [THETA_EST ITERS THETA_CONV TIME]=fit_psf(DATA,MODEL,THETA_INI,METHOD,MAX_ITER=20,TOL=1e-3,H=0.001)
+      next_estimated_obj=imsmooth(next_estimated_obj,"gaussian",0.45);
+      if (rem(iter,REPEAT)==0)
+	fit_psf_tol=sqrt(crlb_poisson(@(aux)(max(IMAGE(:))*PSF(aux)),PSF_PARAMETERS))	
+        [PSF_PARAMETERS ITERS THETA_CONV TIME]=fit_psf(IMAGE,@(THETA_AUX)model(current_estimated_obj,THETA_AUX), PSF_PARAMETERS,"ml",fit_psf_tol);
+        THETA_CONV
+      endif
+
+      if (MSE(iter)<=TOL)
+        reached_TOL = true;
+        MSE = MSE(1:iter);
+      endif
+
+      iter +=1;
+    
+    endwhile
+
+    ESTIMATED_OBJECT = next_estimated_obj;
+
+  endfunction
+
+    #+END_SRC
+
+    #+NAME: bdeconv2-test
+    #+BEGIN_SRC octave :exports none :noweb yes :tangle ../octave/image-processing/bdeconv2_test.m :padline no
+ addpath(genpath("../../octave"))
+  <<gl-model-setup>>
+  m.n_col=19;
+  m.n_row=19;
+  m.n_lay=1;
+  peak_shift=-0.5;
+  t_s=5;
+  m.image_formation = @(T_S,NORM)generate_image_stack(@(XX,YY,ZZ)m.gl_psf_punctual(XX,YY,ZZ,T_S),...
+                                                      m.pixel_size,m.pixel_size,m.delta_z,...
+                                                      m.n_col,m.n_row,m.n_lay,NORM,peak_shift);
+  psf=m.image_formation(t_s,"none");
+  psf_model=@(THETA_AUX)m.image_formation(THETA_AUX,"none");
+  data=zeros(128);
+  data(32:95,32:95)=data(32:95,32:95)+ones(64);
+  data(48:79,48:79)=data(48:79,48:79)-ones(32);
+  data=1e3*data;
+  data_b=abs(ifft2(fft2(data).*(abs(fft2(psf,128,128)))));
+  data_n=poissrnd(data_b);
+  t_s_ini=5.2;
+  MaxIter=100;
+  ##function [ESTIMATED_OBJECT PSF_PARAMETERS MSE] = bdeconv2(IMAGE, PSF, THETA_INI, P, TOL, MAX_ITER) 
+  disp("parametros imagen sin ruido")
+  [estimated_data_b params error_data_b]=bdeconv2(data_b,psf_model,t_s_ini,1e-3,MaxIter); 
+  disp("parametros imagen con ruido")
+  [estimated_data_n params error_data_n]=bdeconv2(data_n,psf_model,t_s_ini,1e-3,MaxIter); 
+
+
+  graphics_toolkit("gnuplot");
+  figure(1);
+  clf;
+  set(gcf,'Color',[.5,.5,.5]) 
+  subplot(2,3,1)
+  imshow(data,[])
+  subplot(2,3,2)
+  imshow(data_b,[]); 
+  subplot(2,3,3)
+  imshow(data_n,[]);
+  subplot(2,3,5)
+  imshow(estimated_data_b,[]);
+  subplot(2,3,6)
+  imshow(estimated_data_n,[]);
+
+  colormap(gray)
+  figure(2);
+  clf;
+  plot(error_data_n,"g"); hold on;
+  plot(error_data_b,"r"); hold off
+
+    #+END_SRC
+
+    #+NAME: bdeconv3
+    #+BEGIN_SRC octave :exports none :tangle ../octave/image-processing/bdeconv3.m :padline no
+  function [ESTIMATED_OBJECT ESTIMATED_PSF MSE_OBJ ] = bdeconv3(IMAGE, PSF_INI, P,TOL, MAX_ITER) 
+    ## usage: [ESTIMATED_OBJECT ESTIMATED_PSF MSE_OBJ] = bdeconv3(IMAGE, PSF_INI, P,TOL, MAX_ITER) 
+    ESTIMATED_OBJECT = zeros(size(IMAGE));
+    ESTIMATED_PSF = zeros(size(PSF_INI));
+    current_estimated_obj = zeros(size(IMAGE));
+    next_estimated_obj = zeros(size(IMAGE));
+    current_estimated_psf=zeros(size(PSF_INI));
+    next_estimated_psf=zeros(size(PSF_INI));
+    estimated_image = zeros(size(IMAGE));
+    reached_TOL = false;
+    psf_dims=size(PSF_INI);
+    iter = 1;
+    lambda=0;
+    while ((iter <= MAX_ITER) && (reached_TOL!=true))
+      if (iter == 1)
+        current_estimated_obj = IMAGE;
+        current_estimated_psf = resize(PSF_INI,size(IMAGE));
+        current_estimated_psf/=sum(current_estimated_psf(:));
+        next_estimated_psf=current_estimated_psf;
+      else
+        current_estimated_obj = next_estimated_obj;
+        current_estimated_psf= next_estimated_psf;
+        current_estimated_obj(current_estimated_obj<0)=0;
+        current_estimated_psf(current_estimated_psf<0)=0;
+      endif
+
+      estimated_image=stationary_imaging(current_estimated_obj,current_estimated_psf);
+
+      image_frac=IMAGE./estimated_image;
+      if (lambda!=0)
+        maximum_entropy_obj=lambda*current_estimated_obj.*log(current_estimated_obj);
+        maximum_entropy_obj(isnan(maximum_entropy_obj))=0;
+      endif
+      next_estimated_obj=current_estimated_obj.*(abs(stationary_imaging(image_frac,current_estimated_psf)).^P);
+
+      next_estimated_psf=current_estimated_psf.*(abs(stationary_imaging(image_frac,current_estimated_obj)).^P);
+
+      next_estimated_psf/=sum(next_estimated_psf(:));
+
+      MSE_OBJ(iter) = sumsq(IMAGE(:)-estimated_image(:))/prod(size(IMAGE)); 
+##      MSE_OBJ(iter) = poiss_log_likelihood(IMAGE(:),estimated_image(:)); 
+      if (iter>1)
+        if ((MSE_OBJ(iter)<MSE_OBJ(iter-1)))
+          reached_TOL = true;
+          MSE_OBJ = MSE_OBJ(1:iter-1);
+          iter
+        endif
+      endif
+      iter +=1;
+
+    endwhile
+    
+    ESTIMATED_OBJECT = current_estimated_obj;
+    ESTIMATED_PSF = resize(current_estimated_psf,psf_dims);
+  endfunction
+
+    #+END_SRC
+
+    #+NAME: bdeconv3-test
+    #+BEGIN_SRC octave :results output :exports none :noweb yes :tangle ../octave/image-processing/bdeconv3_test.m
+      addpath(genpath("../../octave"))
+      <<gl-model-setup>>
+      m.n_col=25;
+      m.n_row=25;
+      m.n_lay=1;
+      peak_shift=-0.7;
+      t_s=5;
+      m.image_formation = @(T_S,NORM)generate_image_stack(@(XX,YY,ZZ)m.gl_psf_punctual(XX,YY,ZZ,T_S),...
+                                                          m.pixel_size,m.pixel_size,m.delta_z,...
+                                                          m.n_col,m.n_row,m.n_lay,NORM,peak_shift);
+      psf_model=@(THETA_AUX)m.image_formation(THETA_AUX,"none");
+      psf=psf_model(t_s);
+      data=zeros(128);
+      data(32:95,32:95)=data(32:95,32:95)+ones(64);
+      data(48:79,48:79)=data(48:79,48:79)-ones(32);
+      max_photon_count=1e5;
+      data=1e4*data;
+      data_b=stationary_imaging(data,psf);
+      data_n=poissrnd(data_b);
+
+      MaxIter=100;
+      P=1; 
+      t_s_ini=5.2;
+      t_s_ini_b=t_s_ini;
+      t_s_ini_n=t_s_ini;
+      psf_ini=m.image_formation(t_s_ini_b,"none");
+      psf_ini_b=psf_ini;
+      psf_ini_n=psf_ini;
+      J=10;
+      for j=1:J
+        [estimated_data_b estimated_psf_b error_data_b ]=bdeconv3(data_b,psf_ini_b,P,1,MaxIter);
+        [estimated_data_n estimated_psf_n error_data_n ]=bdeconv3(data_n,psf_ini_n,P,1,MaxIter);
+        error_db=min(error_data_b);
+        error_dn=min(error_data_n);
+        [psf_param_b ITS THETA_CONV, TIME]=fit_psf(estimated_psf_b*max_photon_count,@(THETA_AUX)(psf_model(THETA_AUX)*max_photon_count), t_s_ini_b,"ml");
+        [psf_param_n ITS THETA_CONV, TIME]=fit_psf(estimated_psf_n*max_photon_count,@(THETA_AUX)(psf_model(THETA_AUX)*max_photon_count), t_s_ini_n,"ml");
+        t_s_ini_b=psf_param_b 
+        t_s_ini_n=psf_param_n 
+        psf_ini_b=psf_model(t_s_ini_b);
+        psf_ini_n=psf_model(t_s_ini_n);
+      endfor
+
+      graphics_toolkit("gnuplot");
+      figure(1);
+      set(gcf,'Color',[.5,.5,.5]) 
+      subplot(3,3,1)
+      imshow(data,[])
+      subplot(3,3,2)
+      imshow(data_b,[]); 
+      subplot(3,3,3)
+      imshow(data_n,[]);
+      subplot(3,3,4) 
+      imshow(psf,[]);
+      subplot(3,3,5)
+      imshow(estimated_data_b,[]);
+      subplot(3,3,6)
+      imshow(estimated_data_n,[]);
+      subplot(3,3,7)
+      imshow(psf_ini,[]);
+      subplot(3,3,8)
+      imshow(psf_ini_b,[]);
+      subplot(3,3,9)
+      imshow(psf_ini_n,[]);
+      colormap(pink);
+
+      figure(2);
+      subplot(2,2,1:2)
+      plot(error_data_n,"g"); hold on;
+      plot(error_data_b,"r"); hold off
+      subplot(2,2,3)
+      plot(psf_ini(10,:),"g");hold on;
+      plot(psf_ini_b(10,:),"r");hold off;
+      subplot(2,2,4)
+      plot(psf_ini(10,:),"g");hold on;
+      plot(psf_ini_n(10,:),"r");hold off;
+
+      disp("datos")
+      disp("\t min \t mean\t max");
+      disp([min(data(:)) mean(data(:)) max(data(:))]);
+      disp([min(data_b(:)) mean(data_b(:)) max(data_b(:))]);
+      disp([min(data_n(:)) mean(data_n(:)) max(data_n(:))]);
+      disp("datos estimados")
+      disp([min(estimated_data_b(:)) mean(estimated_data_b(:)) max(estimated_data_b(:))]);
+      disp([min(estimated_data_n(:)) mean(estimated_data_n(:)) max(estimated_data_n(:))]);
+
+
+    #+END_SRC
+
+    #+NAME: rldeconv
+    #+BEGIN_SRC octave :exports none :tangle ../octave/image-processing/rldeconv.m :padline no
+      function [ESTIMATED_OBJECT ESTIMATED_PSF COMPARISON_VALUE] = rldeconv(IMAGE, PSF, varargin) 
+        ## usage: [ESTIMATED_OBJECT ESTIMATED_PSF COMPARISON_VALUE] = rleconv(IMAGE, PSF, OPTIONS) 
+        ## Blind Deconvolution by Maximum Likelihood
+        ## IMAGE is the acquired image
+        ## PSF is an estimate of point spread function of the microscope
+        ## TOL is the minimal error in the estimated object
+        ## MAX_ITER is the highest amount of iterations to be run if the specified tolerance value (TOL) has not been reached
+        ## Returns 
+        ## ESTIMATED_OBJECT
+        ## ESTIMATED_PSF
+        ## Author: Javier Eduardo Diaz Zamboni
+        ## Created: 2016/06/01
+        ## Version: 0.1
+
+        options = struct("exponent",0.1,...
+	                 "max_iter",50,...
+			 "tol",1e-3,...
+    			 "noise_filtering","gaussian",...
+    			 "iterations_per_filtering",1,...
+    			 "filter_size",3,...
+			 "comparison","se",...
+			 "gaussian_spread",0.4,...
+			 "wiener_snr",100);
+        if ((nargin-2)==1)
+          options=test_function_options(options,varargin{1});
+        else
+          if ((nargin-2)>1)
+    	options=test_function_options(options,varargin);
+          endif
+        endif
+        switch options.comparison
+          case {"se"}
+          case {"idiv"}
+          otherwise
+    	error("%s is not a valid comparison method",options.comparison)
+        endswitch
+
+
+        psf_size=size(PSF);
+        im_size=size(IMAGE);
+        ESTIMATED_OBJECT = zeros(im_size);
+        current_estimated_obj = zeros(im_size);
+        next_estimated_obj = zeros(im_size);
+        estimated_image = zeros(im_size);
+        reached_TOL = false;
+        sum_psf=sum(PSF(:));
+        IMAGE_aux=IMAGE;
+        if (~strcmp(options.noise_filtering,""))
+          switch options.noise_filtering
+    	case {"wiener"}
+    	  IMAGE_aux=wdeconv((IMAGE),PSF/sum(PSF(:)),"snr",options.wiener_snr);
+    	case {"gaussian"}
+              if (im_size(1)>=options.filter_size)
+                rows=options.filter_size;
+              else
+                rows=im_size(1);
+              endif
+              if (im_size(2)>=options.filter_size)
+                cols=options.filter_size;
+              else
+                cols=im_size(2);
+              endif
+              w=fspecial("gaussian",[rows cols],options.gaussian_spread);
+              IMAGE_aux=abs(ifft2(fft2(IMAGE).*abs(fft2(w,im_size(1),im_size(2)))));
+    	otherwise
+    	  error("'%s' is an invalid value for NOISE_FILTERING",options.noise_filtering)
+          endswitch
+        endif
+
+        iter = 1;
+
+        while ((iter <= options.max_iter) && (reached_TOL!=true))
+          if (iter == 1)
+    	current_estimated_obj = IMAGE_aux;
+    	current_estimated_psf= PSF;
+    	current_estimated_psf=resize(current_estimated_psf,im_size);
+          else
+    	current_estimated_obj = next_estimated_obj;
+    	current_estimated_psf = next_estimated_psf;
+          endif
+
+          estimated_image=stationary_imaging(current_estimated_obj, current_estimated_psf);
+
+
+          image_frac=IMAGE./estimated_image;
+
+          ## object estimation 
+          next_estimated_obj=current_estimated_obj.*(abs(stationary_imaging(image_frac,flipdim(current_estimated_psf,3))).^options.exponent);
+
+          ## psf estimation    
+          next_estimated_psf=current_estimated_psf.*(abs(stationary_imaging(image_frac,current_estimated_obj)).^options.exponent);
+          next_estimated_psf/=(sum(next_estimated_psf(:))*sum_psf);
+          ## filtering
+
+          if (~(strcmp(options.noise_filtering,""))&&(mod(iter,options.iterations_per_filtering)==0))
+    	  switch options.noise_filtering
+    	  case {"wiener"}
+                next_estimate_obj=wdeconv(next_estimated_obj,PSF/sum(PSF(:)),"snr",options.wiener_snr);
+    	  case {"gaussian"}
+                next_estimated_obj=abs(ifft2(fft2(next_estimated_obj).*abs(fft2(w,im_size(1),im_size(2)))));
+      	  endswitch
+          endif
+
+          switch options.comparison
+    	case {"se"}
+    	  COMPARISON_VALUE = sumsq(IMAGE(:)-estimated_image(:));
+    	case {"idiv"}
+    	  COMPARISON_VALUE = i_divergence(IMAGE(:),estimated_image(:));
+    	otherwise
+    	  error("%s is not a valid comparison method",options.comparison)
+          endswitch
+
+          iter +=1;
+
+        endwhile
+
+        ESTIMATED_OBJECT =next_estimated_obj;
+        ESTIMATED_PSF= resize(next_estimated_psf,psf_size);
+      endfunction
+
+    #+END_SRC
+
+    #+NAME: rldeconv-test
+    #+BEGIN_SRC octave :exports none :noweb yes :tangle ../octave/image-processing/rldeconv_test.m :padline no
+  addpath(genpath("../../octave"))
+  <<gl-model-setup>>
+  m.n_col=51;
+  m.n_row=51;
+  m.n_lay=1;
+  m.pixel_size=13;
+  peak_shift=-1.0;
+  t_s=5;
+  m.image_formation = @(T_S,NORM)generate_image_stack(@(XX,YY,ZZ)m.gl_psf_punctual(XX,YY,ZZ,T_S),...
+                                                      m.pixel_size,m.pixel_size,m.delta_z,...
+                                                      m.n_row,m.n_col,m.n_lay,"none",peak_shift);
+  S_0=sum(m.image_formation(0)(:));
+  psf=m.image_formation(t_s,"none")/S_0;
+  data=zeros(128);
+  data(32:95,32:95)=data(32:95,32:95)+ones(64);
+  data(48:79,48:79)=data(48:79,48:79)-ones(32);
+  data(100:110,100)=1;
+  data(100:110,102)=1;
+  data(10,100:110)=0.3;
+  data(12,100:110)=0.3;
+  photon_number=1e2;
+  data=photon_number*data;
+  data_b=abs(ifft2(fft2(data).*(abs(fft2(psf,128,128)))));
+  data_n=poissrnd(data_b);
+  t_s_ini=4;
+  psf_ini=m.image_formation(t_s_ini,"none")/S_0;
+  MaxIter=100;
+  mse_bo=zeros(MaxIter,1);
+  mse_no=zeros(MaxIter,1);
+  ssim_bo=zeros(MaxIter,1);
+  ssim_no=zeros(MaxIter,1);
+  ssim_bi=zeros(MaxIter,1);
+  ssim_ni=zeros(MaxIter,1);
+  for i=1:MaxIter
+    [estimated_data_b estimated_psf_b error_data_b]=rldeconv(data_b,psf_ini,"max_iter",i); 
+    [estimated_data_n estimated_psf_n error_data_n]=rldeconv(data_n,psf_ini,"max_iter",i);
+    mse_bo(i)=sumsq(data(:)-estimated_data_b(:));
+    mse_no(i)=sumsq(data(:)-estimated_data_n(:));
+    ssim_bo(i)=mean(ssim(data,estimated_data_b)(:));
+    ssim_no(i)=mean(ssim(data,estimated_data_n)(:));
+    ssim_bi(i)=mean(ssim(data_b,stationary_imaging(estimated_data_b,estimated_psf_b))(:));
+    ssim_ni(i)=mean(ssim(data_n,stationary_imaging(estimated_data_n,estimated_psf_n))(:));
+  endfor
+   format short e;
+    disp("Data\t Min\t Max\t Sum")
+    disp(strcat("Or\t",num2str(min(data(:))),"\t",num2str(max(data(:))),"\t",num2str(sum(data(:)))))
+    disp(strcat("blur\t",num2str(min(data_b(:))),"\t",num2str(max(data_b(:))),"\t",num2str(sum(data_b(:)))))
+    disp(strcat("noisy\t",num2str(min(data_n(:))),"\t",num2str(max(data_n(:))),"\t",num2str(sum(data_n(:)))))
+    disp(strcat("rl\t",num2str(min(estimated_data_b(:))),"\t",num2str(max(estimated_data_b(:))),"\t",num2str(sum(estimated_data_b(:)))))
+    disp(strcat("rl\t", num2str(min(estimated_data_n(:))),"\t",num2str(max(estimated_data_n(:))),"\t",num2str(sum(estimated_data_n(:)))))
+
+    graphics_toolkit("gnuplot");
+    figure(1);
+    set(gcf,'Color',[.5,.5,.5]) 
+    subplot(2,4,1);  imshow(psf,[])
+    subplot(2,4,2);  imshow(data,[0 photon_number]); 
+    subplot(2,4,3);  imshow(data_b,[0 photon_number]);
+    subplot(2,4,4);  imshow(data_n,[0 photon_number]);
+    subplot(2,4,5);  imshow(estimated_psf_b,[])
+    subplot(2,4,6);  imshow(estimated_psf_n,[])
+    subplot(2,4,7);  imshow(estimated_data_b,[0 photon_number]); 
+    subplot(2,4,8);  imshow(estimated_data_n,[0 photon_number]); 
+    colormap(parula(256))
+
+    figure(2);
+    clf;
+    subplot(2,2,1)
+    plot(error_data_b,"r");
+    subplot(2,2,2)
+    plot(error_data_n,"r"); 
+    subplot(2,2,3)
+    plot(mse_bo,"r"); 
+    subplot(2,2,4)
+    plot(mse_no,"r"); 
+    figure(3);
+    clf;
+    subplot(2,2,1)
+    plot(ssim_bo,"r"); 
+    subplot(2,2,2)
+    plot(ssim_no,"r"); 
+    subplot(2,2,3)
+    plot(ssim_bi,"r"); 
+    subplot(2,2,4)
+    plot(ssim_ni,"r"); 
+
+    #+END_SRC
+
+*** Prueba para comparar resultados entre estimación de PSF con JVC y ML deconvolution :noexport:
+
+    #+NAME:deconv_test_JVC_vs_ML
+    #+BEGIN_SRC octave :exports none :noweb yes :tangle ../octave/image-processing/deconv_test_jvc_vs_ml.m :padline no
+  addpath(genpath("../../octave"))
+  <<gl-model-setup>>
+  m.n_col=19;
+  m.n_row=19;
+  m.n_lay=1;
+  peak_shift=-1;
+  t_s=5;
+  m.image_formation = @(T_S,NORM)generate_image_stack(@(XX,YY,ZZ)m.gl_psf_punctual(XX,YY,ZZ,T_S),...
+                                                      m.pixel_size,m.pixel_size,m.delta_z,...
+                                                      m.n_col,m.n_row,m.n_lay,NORM,peak_shift);
+  psf=m.image_formation(t_s,"none");
+  psf_model=@(THETA_AUX)m.image_formation(THETA_AUX,"none");
+  data=zeros(128);
+  data(32:95,32:95)=data(32:95,32:95)+ones(64);
+  data(48:79,48:79)=data(48:79,48:79)-ones(32);
+  data=2e8*data;
+  data_b=abs(ifft2(fft2(data).*(abs(fft2(psf,length(data),length(data))))));
+  data_n=poissrnd(data_b);
+  t_s_ini=4.9;
+  MaxIter=30;
+  P=1;
+
+  disp("Deconvolucion algoritmo JVC")
+  [ml_estimated_data_b ml_params_b ml_error_data_b]=bdeconv(data_b,psf_model,t_s_ini,P,1e-3,MaxIter); 
+  [ml_estimated_data_n ml_params_n ml_error_data_n]=bdeconv(data_n,psf_model,t_s_ini,P,1e-3,MaxIter); 
+  disp("Deconvolucion algoritmo JVC")
+  ## JVC deconvolution
+  [jvc_estimated_data_b jvc_params_b jvc_error_data_b]=bdeconv2(data_b,psf_model,t_s_ini,"square",MaxIter,1e-3); 
+  [jvc_estimated_data_n jvc_params_n jvc_error_data_n]=bdeconv2(data_n,psf_model,t_s_ini,"square",MaxIter,1e-3); 
+
+  disp("Resumen parámetros psf algoritmo ML")
+  disp(strcat("caso difraccion:\t",num2str(ml_params_b)))
+  disp(strcat("caso difraccion y ruido:\t",num2str(ml_params_n)))
+
+  disp("Resumen parámetros psf algoritmo JVC")
+  disp(strcat("caso difraccion:\t",num2str(jvc_params_b)))
+  disp(strcat("caso difraccion y ruido:\t",num2str(jvc_params_n)))
+
+  disp("Resumen SSIM algoritmo ML")
+  disp(strcat("caso difraccion:\t",num2str(mean(ssim(data,ml_estimated_data_b)(:)))));
+  disp(strcat("caso difraccion y ruido:\t",num2str(mean(ssim(data,ml_estimated_data_n)(:)))))
+
+  disp("Resumen SSIM algoritmo JVC")
+  disp(strcat("caso difraccion:\t",num2str(mean(ssim(data,jvc_estimated_data_b)(:)))))
+  disp(strcat("caso difraccion y ruido:\t",num2str(mean(ssim(data,jvc_estimated_data_n)(:)))))
+
+
+  graphics_toolkit("gnuplot");
+  figure(1);
+  clf;
+  set(gcf,'Color',[.5,.5,.5]) 
+  subplot(3,3,1)
+  imshow(data,[])
+  subplot(3,3,2)
+  imshow(data_b,[]); 
+  subplot(3,3,3)
+  imshow(data_n,[]);
+  subplot(3,3,5)
+  imshow(ml_estimated_data_b,[]);
+  subplot(3,3,6)
+  imshow(ml_estimated_data_n,[]);
+  subplot(3,3,8)
+  imshow(jvc_estimated_data_b,[]);
+  subplot(3,3,9)
+  imshow(jvc_estimated_data_n,[]);
+
+
+  colormap(gray)
+  figure(2);
+  clf;
+  plot(ml_error_data_n,".g"); hold on;
+  plot(ml_error_data_b,".r"); hold on;
+  plot(jvc_error_data_n,"g"); hold on;
+  plot(jvc_error_data_b,"r"); hold off;
+
+    #+END_SRC
+
+** Algoritmos deconvolución variante en la produndidad
+*** Estratificado con ventaneo
+    #+NAME:dvdeconv
+    #+BEGIN_SRC octave :noweb yes :exports none :tangle ../octave/image-processing/dvdeconv.m :padline no
+      function [ESTIMATED_OBJECT, COMPARISON_VALUE] = dvdeconv(IMAGE, PSF,Z,varargin) 
+        ## usage: [ESTIMATED_OBJECT, COMPARISON_VALUE] = dvdeconv(IMAGE, PSF,Z, OPTIONS) 
+        ## Depth Variant Nonlinear Deconvolution Method
+        ## IMAGE is the acquired image
+        ## PSF is a function handle for computing the point spread function
+        ## of the microscope.
+        ## Z is a vector containing the depths for computing the PSF
+        ## OPTIONS 
+        ## Returns 
+        ## ESTIMATED_OBJECT
+        ## COMPARISON_VALUE is the mean scalar value of the image comparison
+        ## criteria of each block.
+        ## between the image and the estimated image
+        ## Author: Javier Eduardo Diaz Zamboni
+        ## Created: 2017/05/05
+        ## Version: 0.1
+
+        options = struct("exponent",1,"max_iter",50,"tol",1e-3,"window","hanning","window_size",15,"method","ml", "noise_filtering","","iterations_per_filtering",1,"comparison","se");
+
+        ## count arguments
+        if ((nargin-3)==1)
+          options=test_function_options(options,varargin{1});
+        else
+          if ((nargin-3)>1)
+    	options=test_function_options(options,varargin);
+          endif
+        endif
+
+        switch options.window
+          case {"hanning"}
+    	w=hanning(options.window_size);
+          case {"gaussian"}
+    	w=gausswin(options.window_size);
+          otherwise 
+    	w=hanning(options.window_size);
+        endswitch
+
+        w=reshape(w,1,1,options.window_size);     
+        COMPARISON_VALUE=0;
+        K=size(IMAGE,3);
+        T=length(Z);  
+        if (T>K)
+          error("LENGTH(Z) must be less or equal to SIZE(IMAGE,3)")
+        endif
+        if (mod(K,T)!=0)
+          error(" SIZE(IMAGE,3)/(LENGTH(Z) must be an integer, by now")
+        else
+          block_size=K/T;
+        endif
+        warning ("off", "Octave:broadcast");
+        ESTIMATED_OBJECT=zeros(size(IMAGE));
+        bs_it=0;
+        SE=0;
+        for t=1:T
+          if (t<T)
+    	aux_data=IMAGE(:,:,bs_it+1:bs_it+block_size+fix(options.window_size/2));
+          else
+    	aux_data=IMAGE(:,:,bs_it+1:bs_it+block_size);
+          endif
+          ##aux_data(:,:,1:fix(options.window_size/2))=aux_data(:,:,1:fix(options.window_size/2)).*w(1,1,1:fix(options.window_size/2));
+          ##aux_data(:,:,end-fix(options.window_size/2):end)=aux_data(:,:,end-fix(options.window_size/2):end).*w(1,1,end-fix(options.window_size/2):end);
+          if (ismatrix(PSF))
+    	psf=PSF(:,:,:,t);
+          else
+    	psf=PSF(Z(t));
+          endif
+          switch options.method
+    	case {"ml"}
+    	  [aux_estimated_obj, COM_VAL_AUX]=mldeconv(aux_data,psf,"exponent",options.exponent,"max_iter", options.max_iter,"tol",options.tol,"comparison",options.comparison);
+    	case {"rl"}
+    	  [aux_estimated_obj aux_estimated_psf COM_VAL_AUX]=rldeconv(aux_data,psf,"exponent",options.exponent/10,"max_iter", options.max_iter,"tol",options.tol,"comparison",options.comparison);
+
+    	case {"jvc"}
+    	  [aux_estimated_obj, COM_VAL_AUX]=jvcdeconv(aux_data,psf,"max_iter", options.max_iter,"tol",options.tol,"noise_filtering",options.noise_filtering,"iterations_per_filtering",options.iterations_per_filtering,"comparison",options.comparison);
+    	case {"gold"}
+    	  [aux_estimated_obj, COM_VAL_AUX]=gdeconv(aux_data,psf,"exponent",options.exponent,"max_iter", options.max_iter,"tol",options.tol,"noise_filtering",options.noise_filtering,"comparison",options.comparison);
+    	otherwise
+    	  error("Invalid deconvolution method")
+          endswitch
+
+          if (bs_it==0)
+    	ESTIMATED_OBJECT(:,:,bs_it+1:bs_it+block_size+fix(options.window_size/2))=aux_estimated_obj;
+          else
+    	aux_estimated_obj(:,:,1:fix(options.window_size/2))= aux_estimated_obj(:,:,1:fix(options.window_size/2)).*w(1,1,1:fix(options.window_size/2));
+    	ESTIMATED_OBJECT(:,:,bs_it+1:bs_it+block_size)+=aux_estimated_obj(:,:,1:block_size);
+          endif
+          if (t<T)
+    	ESTIMATED_OBJECT(:,:,bs_it+block_size+1:bs_it+block_size+fix(options.window_size/2))=aux_estimated_obj(:,:,block_size+1:block_size+fix(options.window_size/2)).*w(1,1,end-fix(options.window_size/2)+1:end);    
+          endif
+          bs_it+=block_size;
+          COMPARISON_VALUE+=COM_VAL_AUX/T;
+        endfor
+        warning ("on", "Octave:broadcast");
+      endfunction
+    #+END_SRC
+
+    #+NAME: dvdeconv-test
+    #+BEGIN_SRC octave :noweb yes :exports none :tangle ../octave/image-processing/dvdeconv-test.m
+      clear all;
+      more off;
+      addpath(genpath("../../octave"))
+      <<gl-model-setup>>
+      m.n_col=1;
+      m.n_row=31;
+      m.n_lay=51;
+      peak_shift=0;
+      t_s=0;
+
+      m.peak_formation = @(T_S,PS=0)generate_image_stack(@(XX,YY,ZZ)m.gl_psf_punctual(XX,YY,ZZ,T_S),m.pixel_size,m.pixel_size,m.delta_z,1,1,1,"none",PS);
+
+      m.image_formation = @(T_S,PS=0)generate_image_stack(@(XX,YY,ZZ)m.gl_psf_punctual(XX,YY,ZZ,T_S),...
+                    				 m.pixel_size,m.pixel_size,m.delta_z,...
+                    				 m.n_row,m.n_col,m.n_lay,"none",PS);
+
+
+      S_max=sum(m.image_formation(0)(:));
+      K=128;#número de secciones ópticas
+      psf_model=@(THETA_AUX,PS=0)m.image_formation(THETA_AUX,PS)/S_max;
+      data=zeros(128,1,K);
+
+      ## TRES ESFERAS HUECAS A TRES PROFUNDIDADES DISTINTAS
+      h_ring=intensity_ring(15,8);
+      data(21:35,1,41:55)=h_ring*0.3;
+      data(61:75,1,59:73)=h_ring*0.75;
+      data(101:115,1,79:93)=h_ring;
+
+      ## número de fotones
+      data=1e3*data;
+      data_b=zeros(size(data));
+      imagen=zeros(size(data));
+      ## data_b=stationary_imaging(data,psf);
+      sum_psf_vec=zeros(m.n_lay,K);
+      t_s_vec=linspace(-7.5,20,K);
+      for k=fix(m.n_lay/2)+1:K-fix(m.n_lay/2)
+        tic;
+        [psf_aux, peak_shift]=m.peak_formation(t_s_vec(k));
+        psf=psf_model(t_s_vec(k),peak_shift);
+        sum_psf_vec(:,k)=sum(sum(psf,1),2);
+        data_b(:,:,k)=optical_section_imaging(data(:,:,k-fix(m.n_lay/2):k+fix(m.n_lay/2)),psf);
+        toc
+      endfor
+
+      k_idx_0=find(t_s_vec>=0)(1);
+      k_idx_3=find(t_s_vec>=3)(1);
+      k_idx_7=find(t_s_vec>=7)(1);
+      k_idx_11=find(t_s_vec>=11)(1);
+      data_n=poissrnd(data_b);
+
+      graphics_toolkit("gnuplot")
+      figure 1;
+      clf;
+      subplot(4,3,1)
+      imagesc(t_s_vec,1:128,squeeze(data));hold on;
+      line([t_s_vec(k_idx_0) t_s_vec(k_idx_0)], [1 128],"color","white");hold off
+      subplot(4,3,2)
+      imagesc(squeeze(data_b))
+      subplot(4,3,3)
+      imagesc(poissrnd(squeeze(data_b)))
+      psf=psf_model(11); 
+
+      t_s_test=[t_s_vec(k_idx_0) t_s_vec(k_idx_3) t_s_vec(k_idx_7) t_s_vec(k_idx_11)];
+      max_iter=200;  
+      ws=19; # window_size
+      ## gold
+      gdeconv_b_image =dvdeconv(data_b,@(T)psf_model(T),t_s_test,"max_iter",max_iter,"window_size",ws,"method","gold");
+      gdeconv_n_image =dvdeconv(data_n,@(T)psf_model(T),t_s_test,"max_iter",max_iter,"window_size",ws,"method","gold");
+      subplot(4,3,5)
+      imagesc(squeeze(gdeconv_b_image))
+      subplot(4,3,6)
+      imagesc(squeeze(gdeconv_n_image))
+
+      ## ML
+      mldeconv_b_image =dvdeconv(data_b,@(T)psf_model(T),t_s_test,"max_iter",max_iter,"window_size",ws,"method","ml");
+      mldeconv_n_image =dvdeconv(data_n,@(T)psf_model(T),t_s_test,"max_iter",max_iter,"window_size",ws,"method","ml");
+      subplot(4,3,8)
+      imagesc(squeeze(mldeconv_b_image))
+      subplot(4,3,9)
+      imagesc(squeeze(mldeconv_n_image))
+      colormap(parula(256));
+
+      ## JVC
+      jvcdeconv_b_image =dvdeconv(data_b,@(T)psf_model(T),t_s_test,"max_iter",max_iter,"window_size",ws,"method","jvc");
+      jvcdeconv_n_image =dvdeconv(data_n,@(T)psf_model(T),t_s_test,"max_iter",max_iter,"window_size",ws,"method","jvc");
+
+      subplot(4,3,11)
+      imagesc(squeeze(jvcdeconv_b_image))
+      subplot(4,3,12)
+      imagesc(squeeze(jvcdeconv_n_image))
+      colormap(parula(256));
+
+      figure 2;
+      clf;
+      subplot(3,1,1)
+      plot(squeeze(data(29,1,:)),"g");hold on
+      plot(squeeze(data_b(29,1,:)),"b");
+      plot(squeeze(data_n(29,1,:)),"r");
+      plot(squeeze(gdeconv_b_image(29,1,:)),"y");
+      plot(squeeze(gdeconv_n_image(29,1,:)),"k");hold off;
+
+      subplot(3,1,2)
+      plot(squeeze(data(68,1,:)),"g");hold on
+      plot(squeeze(data_b(68,1,:)),"b");
+      plot(squeeze(data_n(68,1,:)),"r");
+      plot(squeeze(mldeconv_b_image(68,1,:)),"y");
+      plot(squeeze(mldeconv_n_image(68,1,:)),"k");hold off;
+
+      subplot(3,1,3)
+      plot(squeeze(data(108,1,:)),"g");hold on
+      plot(squeeze(data_b(108,1,:)),"b");
+      plot(squeeze(data_n(108,1,:)),"r");
+      plot(squeeze(jvcdeconv_b_image(108,1,:)),"y");
+      plot(squeeze(jvcdeconv_n_image(108,1,:)),"k");hold off;
+
+      disp("datos\t min\t max\t sum")
+      disp([min(data_b(:)) max(data_b(:)) sum(data_b(:))])
+      data_n=poissrnd(data_b);       
+      disp([min(data_n(:)) max(data_n(:)) sum(data_n(:))])
+
+      disp("Gold")
+      disp([min( gdeconv_b_image(:)) max( gdeconv_b_image(:)) sum( gdeconv_b_image(:))])
+      disp([min( gdeconv_n_image(:)) max( gdeconv_n_image(:)) sum( gdeconv_n_image(:))])
+      disp("ML")
+      disp([min( mldeconv_b_image(:)) max( mldeconv_b_image(:)) sum( mldeconv_b_image(:))])
+      disp([min( mldeconv_n_image(:)) max( mldeconv_n_image(:)) sum( mldeconv_n_image(:))])
+      disp("JVC")
+      disp([min( jvcdeconv_b_image(:)) max( jvcdeconv_b_image(:)) sum( jvcdeconv_b_image(:))])
+      disp([min( jvcdeconv_n_image(:)) max( jvcdeconv_n_image(:)) sum( jvcdeconv_n_image(:))])
+
+
+    #+END_SRC
+
+*** Restauración con JVC
+    #+NAME:jvcrestore
+    #+BEGIN_SRC octave :noweb yes :exports none :tangle ../octave/image-processing/jvcrestore.m :padline no
+      function [ESTIMATED_OBJECT, COMPARISON_VALUE] = jvcrestore(IMAGE, FORWARD_MODEL,varargin) 
+        ## usage: [ESTIMATED_OBJECT, COMPARISON_VALUE] = jvcrestore(IMAGE,FORWARD_MODEL, OPTIONS) 
+        ## Nonlinear Restoration Method
+        ## IMAGE is the acquired image
+        ## FORWARD_MODEL is a function that computes the forward model that is assumed generate the IMAGE
+        ## OPTIONS 
+        ## Returns 
+        ## ESTIMATED_OBJECT
+        ## COMPARISON_VALUE is the mean scalar value of the image comparison
+        ## Author: Javier Eduardo Diaz Zamboni
+        ## Created: 
+        ## Version: 0.1
+
+        options=struct("exponent",1,...
+	               "relaxation","square",...
+                       "max_iter",50,...
+                       "tol",1e-3,...
+                       "noise_filtering","gaussian",...
+                       "iterations_per_filtering",1,...
+                       "filter_size",11,...
+                       "comparison","se",...
+                       "gaussian_spread",1,...
+                       "wiener_snr",100);
+
+        if ((nargin-2)==1)
+          options=test_function_options(options,varargin{1});
+        else
+          if ((nargin-2)>1)
+            options=test_function_options(options,varargin);
+          endif
+        endif
+
+        switch options.comparison
+          case {"se"}
+          case {"idiv"}
+          otherwise
+            error("%s is not a valid comparison method",options.comparison)
+        endswitch
+	warning ("off", "Octave:broadcast");
+        im_size=size(IMAGE);
+        ESTIMATED_OBJECT = zeros(im_size);
+        current_estimated_obj = zeros(im_size);
+        estimated_image = zeros(im_size);
+
+        reached_TOL = false;
+        IMAGE_aux=IMAGE;
+        if (~strcmp(options.noise_filtering,""))
+          switch options.noise_filtering
+            case {"gaussian"}
+              if (im_size(1)>=options.filter_size)
+                rows=options.filter_size;
+              else
+                rows=im_size(1);
+              endif
+              if (im_size(2)>=options.filter_size)
+                cols=options.filter_size;
+              else
+                cols=im_size(2);
+              endif
+              w=fspecial("gaussian",[rows cols],options.gaussian_spread);
+              IMAGE_aux=abs(ifft2(fft2(IMAGE).*abs(fft2(w,im_size(1),im_size(2)))));
+            otherwise
+              error("'%s' is an invalid value for NOISE_FILTERING",options.noise_filtering)
+          endswitch
+        endif
+        next_estimated_obj = IMAGE_aux;
+        iter = 1;
+
+        while ((iter <= options.max_iter) && (reached_TOL!=true))
+          current_estimated_obj = next_estimated_obj;
+          estimated_image = FORWARD_MODEL(current_estimated_obj);
+          switch options.relaxation
+            case {"square"}
+              A = max(IMAGE(:))/2; 
+              gamma=1 - (current_estimated_obj - A).^2 ./ (A^2); ## Petter Jansson (1984);
+            case {"abs"}
+              A = max(IMAGE(:));
+              gamma = 1 - (2/A)*abs(current_estimated_obj - A/2); ## Petter Jansson (1970)
+            case {"cittert"}
+              gamma = 1; ## Van Cittert 1931
+            otherwise 
+              error("Invalid value for RELAXATION");
+          endswitch
+          next_estimated_obj = current_estimated_obj + gamma .* (IMAGE-estimated_image).^options.exponent;
+          next_estimated_obj(next_estimated_obj< 0) = 0;# forcing positivity constraint
+
+          ## filtering
+
+          if (~(strcmp(options.noise_filtering,""))&&(mod(iter,options.iterations_per_filtering)==0))
+            switch options.noise_filtering
+              case {"gaussian"}
+                next_estimated_obj=abs(ifft2(fft2(next_estimated_obj).*abs(fft2(w,im_size(1),im_size(2)))));
+            endswitch
+          endif
+          iter += 1;
+        endwhile
+        switch options.comparison
+          case {"se"}
+            COMPARISON_VALUE = sumsq(IMAGE(:)-estimated_image(:));
+          case {"idiv"}
+            COMPARISON_VALUE = i_divergence(IMAGE(:),estimated_image(:));
+          otherwise
+            error("%s is not a valid comparison method",options.comparison)
+        endswitch
+	warning ("on", "Octave:broadcast");
+        ESTIMATED_OBJECT = next_estimated_obj;
+      endfunction
+    #+END_SRC
+
+
+    #+NAME: jvcrestore-test
+    #+BEGIN_SRC octave :noweb yes :exports none :tangle ../octave/image-processing/jvcrestore-test.m
+  clear all;
+  more off;
+  addpath(genpath("../../octave"))
+  <<gl-model-setup>>
+  m.n_col=1;
+  m.n_row=31;
+  m.n_lay=51;
+  peak_shift=0;
+  t_s=0;
+
+  m.peak_formation = @(T_S,PS=0)generate_image_stack(@(XX,YY,ZZ)m.gl_psf_punctual(XX,YY,ZZ,T_S),m.pixel_size,m.pixel_size,m.delta_z,1,1,1,"none",PS);
+
+  m.image_formation = @(T_S,PS=0)generate_image_stack(@(XX,YY,ZZ)m.gl_psf_punctual(XX,YY,ZZ,T_S),...
+                				 m.pixel_size,m.pixel_size,m.delta_z,...
+                				 m.n_row,m.n_col,m.n_lay,"none",PS);
+
+
+  S_max=sum(m.image_formation(0)(:));
+  K=128;#número de secciones ópticas
+  psf_model=@(THETA_AUX,PS=0)m.image_formation(THETA_AUX,PS)/S_max;
+  data=zeros(128,1,K);
+
+  ## TRES ESFERAS HUECAS A TRES PROFUNDIDADES DISTINTAS
+  h_ring=intensity_ring(15,8);
+  data(21:35,1,41:55)=h_ring*0.3;
+  data(61:75,1,59:73)=h_ring*0.75;
+  data(101:115,1,79:93)=h_ring;
+
+  ## número de fotones
+  data=1e3*data;
+  data_b=zeros(size(data));
+  imagen=zeros(size(data));
+  ## data_b=stationary_imaging(data,psf);
+  sum_psf_vec=zeros(m.n_lay,K);
+  t_s_vec=linspace(-7.5,20,K);
+  for k=fix(m.n_lay/2)+1:K-fix(m.n_lay/2)
+    tic;
+    [psf_aux, peak_shift]=m.peak_formation(t_s_vec(k));
+    psf=psf_model(t_s_vec(k),peak_shift);
+    sum_psf_vec(:,k)=sum(sum(psf,1),2);
+    data_b(:,:,k)=optical_section_imaging(data(:,:,k-fix(m.n_lay/2):k+fix(m.n_lay/2)),psf);
+    toc
+  endfor
+
+  k_idx_0=find(t_s_vec>=0)(1);
+  k_idx_3=find(t_s_vec>=3)(1);
+  k_idx_7=find(t_s_vec>=7)(1);
+  k_idx_11=find(t_s_vec>=11)(1);
+  data_n=poissrnd(data_b);
+
+  graphics_toolkit("gnuplot")
+  figure 1;
+  clf;
+  subplot(4,3,1)
+  imagesc(t_s_vec,1:128,squeeze(data));hold on;
+  line([t_s_vec(k_idx_0) t_s_vec(k_idx_0)], [1 128],"color","white");hold off
+  subplot(4,3,2)
+  imagesc(squeeze(data_b))
+  subplot(4,3,3)
+  imagesc(poissrnd(squeeze(data_b)))
+  psf=psf_model(11); 
+
+  t_s_test=[t_s_vec(k_idx_0) t_s_vec(k_idx_3) t_s_vec(k_idx_7) t_s_vec(k_idx_11)];
+  max_iter=200;  
+  ws=19; # window_size
+  ## gold
+  gdeconv_b_image =dvdeconv(data_b,@(T)psf_model(T),t_s_test,"max_iter",max_iter,"window_size",ws,"method","gold");
+  gdeconv_n_image =dvdeconv(data_n,@(T)psf_model(T),t_s_test,"max_iter",max_iter,"window_size",ws,"method","gold");
+  subplot(4,3,5)
+  imagesc(squeeze(gdeconv_b_image))
+  subplot(4,3,6)
+  imagesc(squeeze(gdeconv_n_image))
+
+  ## ML
+  mldeconv_b_image =dvdeconv(data_b,@(T)psf_model(T),t_s_test,"max_iter",max_iter,"window_size",ws,"method","ml");
+  mldeconv_n_image =dvdeconv(data_n,@(T)psf_model(T),t_s_test,"max_iter",max_iter,"window_size",ws,"method","ml");
+  subplot(4,3,8)
+  imagesc(squeeze(mldeconv_b_image))
+  subplot(4,3,9)
+  imagesc(squeeze(mldeconv_n_image))
+  colormap(parula(256));
+
+  ## JVC
+  jvcdeconv_b_image =dvdeconv(data_b,@(T)psf_model(T),t_s_test,"max_iter",max_iter,"window_size",ws,"method","jvc");
+  jvcdeconv_n_image =dvdeconv(data_n,@(T)psf_model(T),t_s_test,"max_iter",max_iter,"window_size",ws,"method","jvc");
+
+  subplot(4,3,11)
+  imagesc(squeeze(jvcdeconv_b_image))
+  subplot(4,3,12)
+  imagesc(squeeze(jvcdeconv_n_image))
+  colormap(parula(256));
+
+  figure 2;
+  clf;
+  subplot(3,1,1)
+  plot(squeeze(data(29,1,:)),"g");hold on
+  plot(squeeze(data_b(29,1,:)),"b");
+  plot(squeeze(data_n(29,1,:)),"r");
+  plot(squeeze(gdeconv_b_image(29,1,:)),"y");
+  plot(squeeze(gdeconv_n_image(29,1,:)),"k");hold off;
+
+  subplot(3,1,2)
+  plot(squeeze(data(68,1,:)),"g");hold on
+  plot(squeeze(data_b(68,1,:)),"b");
+  plot(squeeze(data_n(68,1,:)),"r");
+  plot(squeeze(mldeconv_b_image(68,1,:)),"y");
+  plot(squeeze(mldeconv_n_image(68,1,:)),"k");hold off;
+
+  subplot(3,1,3)
+  plot(squeeze(data(108,1,:)),"g");hold on
+  plot(squeeze(data_b(108,1,:)),"b");
+  plot(squeeze(data_n(108,1,:)),"r");
+  plot(squeeze(jvcdeconv_b_image(108,1,:)),"y");
+  plot(squeeze(jvcdeconv_n_image(108,1,:)),"k");hold off;
+
+  disp("datos\t min\t max\t sum")
+  disp([min(data_b(:)) max(data_b(:)) sum(data_b(:))])
+  data_n=poissrnd(data_b);       
+  disp([min(data_n(:)) max(data_n(:)) sum(data_n(:))])
+
+  disp("Gold")
+  disp([min( gdeconv_b_image(:)) max( gdeconv_b_image(:)) sum( gdeconv_b_image(:))])
+  disp([min( gdeconv_n_image(:)) max( gdeconv_n_image(:)) sum( gdeconv_n_image(:))])
+  disp("ML")
+  disp([min( mldeconv_b_image(:)) max( mldeconv_b_image(:)) sum( mldeconv_b_image(:))])
+  disp([min( mldeconv_n_image(:)) max( mldeconv_n_image(:)) sum( mldeconv_n_image(:))])
+  disp("JVC")
+  disp([min( jvcdeconv_b_image(:)) max( jvcdeconv_b_image(:)) sum( jvcdeconv_b_image(:))])
+  disp([min( jvcdeconv_n_image(:)) max( jvcdeconv_n_image(:)) sum( jvcdeconv_n_image(:))])
+
+    #+END_SRC
+
+** Prueba de estimación de PSF a partir de imagen 
+*** Version octave
+    #+NAME: raredeconv
+    #+BEGIN_SRC octave :exports none :tangle ../octave/image-processing/raredeconv.m :padline no
+    function [ESTIMATED_OBJECT, MSE] = raredeconv(IMAGE, PSF, TOL=1e-3, MAX_ITER=50,RELAXATION_OPTION="square") 
+      ESTIMATED_OBJECT = zeros(size(IMAGE));
+      current_estimated_obj = zeros(size(IMAGE));
+      next_estimated_obj = FIRST_GUESS;
+      estimated_image = zeros(size(IMAGE));
+      MSE = 1e6*ones(1, MAX_ITER);
+      reached_TOL = false;
+      iter = 1;
+      A = max(FIRST_GUESS(:))/2;
+
+      while ((iter <= MAX_ITER) && (reached_TOL!=true))
+	current_estimated_obj = next_estimated_obj;
+	estimated_image = optical_section_imaging(current_estimated_obj,PSF);
+
+	switch RELAXATION_OPTION
+	  case {"square"}
+	    gamma=1 - (current_estimated_obj - A).^2 ./ (A^2); ## Petter Jansson (1984);
+	  case {"abs"}
+	    gamma = 1 - (2/A)*abs(current_estimated_obj - A/2); ## Petter Jansson (1970)
+	  case {"cittert"}
+	    gamma = 1; ## Van Cittert 1931
+	  otherwise 
+            error("Invalid value for RELAXATION_OPTION");
+	endswitch
+          next_estimated_obj = current_estimated_obj + gamma .* (IMAGE2D-estimated_image);
+	if (strcmp(RELAXATION_OPTION,"cittert")) ## forcing positivity constraint
+	  next_estimated_obj(next_estimated_obj< 0) = 0;
+	endif
+	MSE(iter) = sumsq(IMAGE2D(:)-estimated_image(:))/prod(size(IMAGE2D));
+	if (MSE(iter)<=TOL)
+	  reached_TOL = true;
+	  MSE = MSE(1:iter);
+	endif
+	iter += 1;
+      endwhile
+      ESTIMATED_OBJECT = next_estimated_obj;
+    endfunction
+    #+END_SRC
+
+    #+NAME: raredeconv-test
+    #+BEGIN_SRC octave :results output :exports none :noweb yes :tangle ../octave/image-analysis/raredeconv_test.m
+  clear all;
+  more off;
+  addpath(genpath("../../octave"))
+  <<gl-model-setup>>
+  m.n_col=1;
+  m.n_row=21;
+  m.n_lay=45;
+  peak_shift=0;
+  t_s=7;
+  m.peak_formation = @(T_S,PS=0)generate_image_stack(@(XX,YY,ZZ)m.gl_psf_punctual(XX,YY,ZZ,T_S),m.pixel_size,m.pixel_size,m.delta_z,1,1,1,"none",PS);
+  m.image_formation = @(T_S,PS=0)generate_image_stack(@(XX,YY,ZZ)m.gl_psf_punctual(XX,YY,ZZ,T_S),...
+                				 m.pixel_size,m.pixel_size,m.delta_z,...
+                				 m.n_row,m.n_col,m.n_lay,"none",PS);
+
+  S_max=max(sum(sum(m.image_formation(0),1),2));
+  K=128;#número de secciones ópticas
+  psf=m.image_formation(t_s);
+  psf_model=@(THETA_AUX,PS=0)m.image_formation(THETA_AUX,PS)/S_max;
+  data=zeros(128,1,K);
+  ## FANTOMAS
+  ## UN CUADRADO HUECO
+  ## data(32:95,1,32:95)=data(32:95,1,32:95)+ones(64,1,64);
+  ## data(48:79,1,48:79)=data(48:79,1,48:79)-ones(32,1,32);
+  ## DOS LINEAS PARALELAS AL EJE Y    
+  ##data(32:95,1,25)=ones(64,1,1);
+  ##data(32:95,1,100)=ones(64,1,1);
+  ## TRES ESFERAS HUECAS A TRES PROFUNDIDADES DISTINTAS
+  h_ring=intensity_ring(11,6);
+  data(23:33,1,43:53)=h_ring;
+  data(63:73,1,61:71)=h_ring;
+  data(103:113,1,81:91)=h_ring;
+  ## data(48:79,1,48:79)=data(48:79,1,48:79)-ones(32,1,32);   
+
+
+  ## número de fotones
+  data=2e2*data;
+
+  data_b=zeros(size(data));
+  imagen=zeros(size(data));
+  ## data_b=stationary_imaging(data,psf);
+  sum_psf_vec=zeros(m.n_lay,K);
+  t_s_vec=linspace(-7.5,20,K);
+  for k=fix(m.n_lay/2)+1:K-fix(m.n_lay/2)
+    tic;
+    psf_aux, peak_shift]=m.peak_formation(t_s_vec(k));
+    psf=psf_model(t_s_vec(k),peak_shift);
+    sum_psf_vec(:,k)=sum(sum(psf,1),2);
+    data_b(:,:,k)=optical_section_imaging(data(:,:,k-fix(m.n_lay/2):k+fix(m.n_lay/2)),psf);
+    toc
+  endfor
+
+  k_idx=find(t_s_vec>=5)(1);
+  imagen=data_b(:,:,k_idx);        
+  ## imagen=poissrnd(imagen);       
+
+  graphics_toolkit("gnuplot")
+  figure 1;
+  clf;
+  subplot(3,1,1)
+  imagesc(t_s_vec,1:128,squeeze(data))
+  subplot(3,1,2)
+  imagesc(squeeze(data_b))
+  subplot(3,1,3)
+  imagesc(poissrnd(squeeze(data_b)))
+  colormap(parula(256));
+
+  ## proc_data=data(:,:,k_idx-fix(m.n_lay/2):k_idx+fix(m.n_lay/2));    
+  ## theta_ini=4.5;
+  ## assumed_psf=psf_model(theta_ini); 
+  ## first_guess=deproject_optical_section(imagen,assumed_psf);
+  ## approx_ob_k=first_guess(:,:,k_idx)-sum(first_guess(:,:,1:k_idx-1),3)-sum(first_guess(:,:,k_idx+1:end),3);
+
+  ## dec_data=mldeconv(data_b(:,:,k_idx-fix(m.n_lay/2):k_idx+fix(m.n_lay/2)), assumed_psf);
+  ## graphics_toolkit("gnuplot")
+  ## figure 1;
+  ## clf;
+  ## subplot(2,2,1);
+  ## plot(imagen)
+  ## subplot(2,2,2);
+  ## plot(squeeze(sum(first_guess,3)))
+  ## subplot(2,2,3);
+  ## plot(squeeze(approx_ob_k))
+  ## subplot(2,2,4);
+  ## plot(squeeze(proc_data(:,:,k_idx)))
+    #+END_SRC
+
+    #+NAME: 
+    #+BEGIN_SRC octave :exports none :tangle ../octave/image-analysis/psf_estimation.m :padline no
+    function PSF_PARAMETERS = psf_estimation(IMAGE,OBJECT,PSF,THETA_INI,METHOD="ml",TOL=1e-3,MAX_ITER=20) 
+        ## IMAGE is the acquired image. Is the sum in the z axis 3D convolution between the psf and object
+        ## PSF is a model of the point spread function of the microscope
+        ## TOL is the minimal error in the estimated object
+        ## MAX_ITER is the highest amount of iterations to be run if the specified tolerance value (TOL) has not been reached
+        ## Returns 
+        ## ERROR is a vector showing the error for the estimated object
+        ## Author: Javier Eduardo Diaz Zamboni
+        ## Created: 2017/04/20
+        ## Version: 0.1
+
+        ## PSF parameter estimation
+        ## [THETA_EST ITERS THETA_CONV TIME]=fit_psf(DATA,MODEL,THETA_INI,METHOD,MAX_ITER=20,TOL=1e-3,H=0.001)
+        model=@(THETA)(optical_section_imaging(OBJECT,PSF(THETA)));
+        [THETA_EST ITERS THETA_CONV TIME]=fit_psf(IMAGE,model,THETA_INI,METHOD,TOL,MAX_ITER,H=0.001)
+        PSF_PARAMETERS=THETA_EST
+      endfunction
+    #+END_SRC
+    
+    #+NAME: psf-estimation-test
+    #+BEGIN_SRC octave :results output :exports none :noweb yes :tangle ../octave/image-analysis/psf_estimation_test.m
+  clear all;
+  more off;
+  addpath(genpath("../../octave"))
+  <<gl-model-setup>>
+  m.n_col=1;
+  m.n_row=31;
+  m.n_lay=45;
+  peak_shift=0;
+  t_s=7;
+  m.image_formation = @(T_S)generate_image_stack(@(XX,YY,ZZ)m.gl_psf_punctual(XX,YY,ZZ,T_S),...
+                				     m.pixel_size,m.pixel_size,m.delta_z,...
+                				     m.n_row,m.n_col,m.n_lay,"none",peak_shift);
+  S_max=max(sum(sum(m.image_formation(0),1),2));
+  K=128; #número de secciones ópticas
+  psf=m.image_formation(t_s);
+  psf_model=@(THETA_AUX)m.image_formation(THETA_AUX)/S_max;
+  data=zeros(128,1,K);
+  ## un cuadrado  hueco
+  data(32:95,1,32:95)=data(32:95,1,32:95)+ones(64,1,64);
+  data(48:79,1,48:79)=data(48:79,1,48:79)-ones(32,1,32);
+  ## dos lineas en z    
+  ## data(32:95,1,25)=ones(64,1,1);
+  ## data(32:95,1,100)=ones(64,1,1);
+
+  ## número de fotones
+  data=2e4*data;
+
+  data_b=zeros(size(data));
+  imagen=zeros(size(data));
+  sum_psf_vec=zeros(m.n_lay,K);
+  t_s_vec=linspace(0,15,K);
+  for k=fix(m.n_lay/2)+1:K-fix(m.n_lay/2)
+    tic;
+    psf=psf_model(t_s_vec(k));
+    sum_psf_vec(:,k)=sum(sum(psf,1),2);
+    data_b(:,:,k)=optical_section_imaging(data(:,:,k-fix(m.n_lay/2):k+fix(m.n_lay/2)),psf);
+    toc
+  endfor
+  data_n=poissrnd(data_b);
+  k_idx=find(t_s_vec>=5)(1);
+  imagen=data_b(:,:,k_idx);        
+  imagen=poissrnd(imagen);       
+  proc_data=data(:,:,k_idx-fix(m.n_lay/2):k_idx+fix(m.n_lay/2));        
+  theta_ini=4.5;
+  disp("ml")
+  psf_estimation(imagen,proc_data,psf_model,theta_ini,"ml")
+  disp("midiv")
+  psf_estimation(imagen,proc_data,psf_model,theta_ini,"midiv")
+  disp("lsqr")
+  psf_estimation(imagen,proc_data,psf_model,theta_ini,"lsqr")
+
+  assumed_psf=psf_model(theta_ini); 
+  MAX_ITER=50;
+  square_error=zeros(MAX_ITER,1);
+  for i=1:MAX_ITER
+  dec_data=jvcdeconv(data_n(:,:,k_idx-fix(m.n_lay/2):k_idx+fix(m.n_lay/2)),assumed_psf/sum(assumed_psf(:)),"relaxation","square","max_iter",i,"tol",1e-3);
+  square_error(i)=sumsq(dec_data(:)-proc_data(:));
+  endfor
+  graphics_toolkit("gnuplot")
+  figure 1;
+  clf;
+  subplot(2,2,1);
+  plot(square_error)
+  subplot(2,2,1);
+  imagesc(squeeze(data_n))
+  subplot(2,2,3);
+  imagesc(squeeze(proc_data))
+  subplot(2,2,4);
+  imagesc(squeeze(dec_data))
+
+  disp("ml")
+  psf_estimation(imagen,dec_data,psf_model,theta_ini,"ml")
+  disp("midiv")
+  psf_estimation(imagen,dec_data,psf_model,theta_ini,"midiv")
+  disp("lsqr")
+  psf_estimation(imagen,dec_data,psf_model,theta_ini,"lsqr")
+
+  figure 2;
+  clf
+  subplot(2,2,1)
+  plot(squeeze(psf));
+  subplot(2,2,2)
+  ##plot(squeeze(data(62,1,:)),"r");hold on;
+  plot(squeeze(data_b(62,1,:))); hold off;
+  subplot(2,2,3)
+  imagesc(squeeze(data))
+  subplot(2,2,4)
+  imagesc(squeeze(data_b))
+  colormap(parula(256))
+    #+END_SRC
+    
+*** Estimar la posición de la PSF a partir de una reconstrucción aproximada 
+    #+NAME: psf-estimation-from-image-02
+    #+BEGIN_SRC octave :exports none :noweb yes :tangle ../octave/image-analysis/psf_estimation_from_image02.m :padline no
+  addpath(genpath("../../octave"))
+  <<gl-model-setup>>
+    m.n_col=71;
+    m.n_row=71;
+    m.n_lay=1;
+    m.pixel_size=4.5;
+    peak_shift=0;
+    t_s=5;
+    t_s_ini=4.5;
+    m.image_formation = @(T_S)generate_image_stack(@(XX,YY,ZZ)m.gl_psf_punctual(XX,YY,ZZ,T_S),...
+                                                                   m.pixel_size,m.pixel_size,m.delta_z,...
+                                                                   m.n_row,m.n_col,m.n_lay,"none",peak_shift);
+    S_0=sum(m.image_formation(0,0)(:));
+    psf_model=@(T_S)m.image_formation(T_S)/S_0;
+    psf=psf_model(t_s);
+    initial_psf=psf_model(t_s);
+    data=zeros(128);
+    data(32:95,32:95)=data(32:95,32:95)+ones(64);
+    data(48:79,48:79)=data(48:79,48:79)-ones(32);
+    data(100:110,100)=1;
+    data(100:110,102)=1;
+    data(10,100:110)=0.3;
+    data(12,100:110)=0.3;
+    data=1000*data;
+    data_b=stationary_imaging(data,psf);
+    data_n=poissrnd(data_b);
+    ## pixelar
+    func=inline("sum(x(:))");
+    data_np=blockproc(data_n,[2 2],func);
+    data_bp=blockproc(data_b,[2 2],func);
+    ## despixelar
+    dfunc=inline("x(:).*ones(2)/4");
+    data_np_d=blockproc(data_np,[1 1],dfunc);
+    data_bp_d=blockproc(data_bp,[1 1],dfunc);
+
+
+    MaxIter=1000;
+    [estimated_data_n,error_data_n]=mldeconv(data_n,initial_psf,"exponent",1,"max_iter",MaxIter,"tol",1e-3);
+    [estimated_data_b,error_data_b]=mldeconv(data_b,initial_psf,"exponent",1,"max_iter",MaxIter,"tol",1e-3); 
+
+    [estimated_data_np_d,error_data_np_d]=mldeconv(data_np_d,initial_psf,"exponent",1,"max_iter",MaxIter,"tol",1e-3);
+    [estimated_data_bp_d,error_data_bp_d]=mldeconv(data_bp_d,initial_psf,"exponent",1,"max_iter",MaxIter,"tol",1e-3); 
+
+    graphics_toolkit("gnuplot");
+    figure(1);
+    clf;
+    set(gcf,"Color",[.5,.5,.5]) 
+    subplot(3,4,1);  imshow(data,[]);
+    subplot(3,4,2);  imshow(psf,[]);
+    subplot(3,4,3);  imshow(initial_psf,[]);
+    subplot(3,4,5);  imshow(data_b,[]); 
+    subplot(3,4,6);  imshow(data_n,[]);
+    subplot(3,4,7);  imshow(data_bp_d,[]);
+    subplot(3,4,8);  imshow(data_np_d,[]);
+    subplot(3,4,9);  imshow(estimated_data_b,[]);
+    subplot(3,4,10); imshow(estimated_data_n,[]);
+    subplot(3,4,11); imshow(estimated_data_bp_d,[]); 
+    subplot(3,4,12); imshow(estimated_data_np_d,[]);
+
+    colormap(parula(256))
+    figure(2);
+    clf;
+    subplot(2,2,1)
+    plot(error_data_n,"g"); hold on;
+    plot(error_data_b,"r"); hold off
+    subplot(2,2,2)
+    plot(error_data_np_d,"g"); hold on;
+    plot(error_data_bp_d,"r"); hold off
+
+     estimated_data_bp_d_deproject=deproject_optical_section(estimated_data_bp_d,initial_psf); 
+     psf_estimation(data_bp_d,estimated_data_bp_d_deproject,psf_model,t_s_ini) 
+    ## psf_estimation
+    #+END_SRC

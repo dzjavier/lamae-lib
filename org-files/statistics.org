@@ -1,0 +1,413 @@
+#+STARTUP:    align showall nodlcheck showstars oddeven lognotestate hideblocks
+
+* Estadística
+  Esta prueba sigue el método propuesto por Montgomery y también publicado [[http://www.google.com.ar/url?sa=t&rct=j&q=&esrc=s&source=web&cd=1&cad=rja&uact=8&ved=0CBwQFjAA&url=http%253A%252F%252Fwww.itl.nist.gov%252Fdiv898%252Fhandbook%252Feda%252Fsection3%252Feda358.htm&ei=dxprVcDaIcqXNsagg5AD&usg=AFQjCNH-zbNnc9bfACJkueBHATjA6Ut6MQ&sig2=TAnD1LbUfyXtTkyRlIAHRw&bvm=bv.94455598,d.eXY][aquí]].  
+** Prueba de hipótesis chi cuadrado para la varianza :noexport:
+*** Versión en octave :noexport:
+#+NAME: chisquare
+#+BEGIN_SRC octave :exports none :noweb yes :tangle ../octave/statistics/chisquare_test_for_the_variance.m
+  function [REJECT CHI0]=chisquare_test_for_the_variance(DATA,SIGMA0,CONFIDENCE,ALTERNATIVE)
+    ## usage: [REJECT CHI0]=chisquare_test_for_the_variance(DATA,SIGMA0,CONFIDENCE,ALTERNATIVE)
+    ## version: 0.1
+    narginchk(4,4);
+    degree_of_freedom=length(DATA)-1;
+    CHI0=degree_of_freedom*(std(DATA).^2)/SIGMA0^2;
+    switch ALTERNATIVE
+      case {"!="}
+        if ((CHI0<chi2inv(CONFIDENCE/2,degree_of_freedom))||(CHI0>chi2inv(1-CONFIDENCE/2,degree_of_freedom)))
+          REJECT=true;
+        else REJECT=false;
+        endif
+      case {"<"}
+        if (CHI0<chi2inv(CONFIDENCE,degree_of_freedom))
+          REJECT=true;
+        else REJECT=false;
+        endif
+      case {">"}
+        if (CHI0>chi2inv(1-CONFIDENCE,degree_of_freedom))
+          REJECT=true;
+        else REJECT=false;
+        endif
+    endswitch
+  endfunction
+#+END_SRC
+
+**** Prueba del código 			:noexport:
+Algunas pruebas:
+#+NAME: chisquare_test
+#+BEGIN_SRC octave :exports none :results output :exports none
+    std_to_test=2;
+    std_real=3;
+    x=normrnd(5,std_real,50,1);
+    alpha=0.01;
+    disp("------------------------")
+    disp("Prueba para establecer si dos varianzas, \n una estimable a partir de los datos y otra de referencia.\n son iguales.")
+    
+    disp(strcat("STD a testear=",num2str(std_to_test)));
+    disp(strcat("STD real =",num2str(std_real)));
+    disp("--------------------------------")
+    disp("H0: las varianzas son iguales")
+    disp("H1: las varianzas son distintas")
+    if (!chi_square_test_for_variance(x,std_to_test,alpha,"!="))
+      disp("-> se cumple H0")
+    else 
+      disp("-> no se cumple H0");
+    endif
+    disp("---------------------------------")
+    disp("H0: las varianzas son iguales")
+    disp("H1: la varianza es mayor")
+    if (!chi_square_test_for_variance(x,std_to_test,alpha,">"))
+      disp("-> se cumple H0")
+    else 
+      disp("-> no se cumple H0");
+    endif
+    disp("---------------------------------")
+    disp("H0: las varianzas son iguales")
+    disp("H1: la varianza es menor")
+    if (!chi_square_test_for_variance(x,std_to_test,alpha,"<"))
+      disp("-> se cumple H0");
+    else
+      disp("-> no se cumple H0");
+    endif
+    disp("--------------------------------")
+#+END_SRC
+
+#+RESULTS: chisquare_test
+
+** Estimación de parámetros
+*** Estimación por minimización de la divergencia
+#+NAME: nr-idiv-fit-function
+#+BEGIN_SRC octave :exports none :tangle ../octave/statistics/nr_idiv_fit.m :padline no
+   function [THETA_EST ITER THETA_CONV]=nr_idiv_fit(DATA,MODEL,THETA_INI,TOL=1e-3,MAX_ITER=20,H=0.001)
+      ## usage: [THETA_EST ITER THETA_CONV]=nr_idiv_fit(DATA,MODEL,THETA_INI,MAX_ITER=20,TOL=1e-3,H=0.001)
+      ## Author: Javier Eduardo Diaz Zamboni <javierdiaz@bioingenieria.edu.ar>
+      ## Version: 0.1
+      ## Keywords: i-divergence, optimization
+      ITER=1;
+      THETA_EST=THETA_INI;
+      THETA_AUX=inf;
+      THETA_CONV=zeros(MAX_ITER,1);
+      while((ITER<=MAX_ITER)&&(abs(THETA_EST-THETA_AUX)>TOL))
+        THETA_AUX=THETA_EST;
+        DEV1_MODEL=dfx(MODEL,THETA_AUX,1,H);
+        DEV1_MODEL_SQR=DEV1_MODEL.^2;
+        DEV2_MODEL=df2x2(MODEL,THETA_AUX,1,H);
+        AUX1=MODEL(THETA_AUX);
+        c=min(AUX1(:))/100;
+        AUX2=log(AUX1(:))-log(DATA(:)+c); 
+        NUMERATOR=sum((DEV1_MODEL(:).*AUX2(:))(:));
+        DENOMINATOR=sum(((DEV2_MODEL(:).*AUX2(:)).+(DEV1_MODEL_SQR(:)./AUX1(:)))(:));
+        THETA_EST-=NUMERATOR/DENOMINATOR;   
+        THETA_CONV(ITER)=THETA_EST;
+        ITER+=1;
+      endwhile
+      if (ITER<=MAX_ITER)
+        THETA_CONV(ITER:MAX_ITER)=[];
+      endif
+    endfunction
+#+END_SRC
+*** Estimación por maximización de la verosimilitud
+#+NAME: nr-poiss-ml-fit-function
+#+BEGIN_SRC octave :exports none :tangle ../octave/statistics/nr_poiss_ml_fit.m :padline no
+  function [THETA_EST ITER THETA_CONV]=nr_poiss_ml_fit(Q,Q_BAR,THETA_INI,TOL=1e-3,MAX_ITER=20,H=0.001)
+    ## usage: [THETA_EST ITER THETA_CONV]=nr_poiss_ml_fit(Q,Q_BAR,THETA_INI,TOL=1e-3,MAX_ITER=20,H=0.001)
+    THETA_EST=THETA_INI;
+    THETA_AUX=inf;
+    ITER=1;
+    THETA_CONV=zeros(MAX_ITER,1);
+    while ((ITER<=MAX_ITER) && (abs(THETA_AUX-THETA_EST)>TOL))
+      THETA_AUX=THETA_EST;
+      DQ1=dfx(Q_BAR,THETA_AUX,1,H);
+      DQ2=df2x2(Q_BAR,THETA_AUX,1,H);
+      Q_Q_BAR_1=(Q(:)./Q_BAR(THETA_AUX)(:)-1);
+      Q_Q_BAR_2=Q(:)./(Q_BAR(THETA_AUX).^2)(:);
+      NUMERATOR=sum((DQ1(:).*Q_Q_BAR_1(:)));
+      DENOMINATOR=sum((DQ2(:).*Q_Q_BAR_1(:))-((DQ1(:).^2).*Q_Q_BAR_2(:)));
+      THETA_EST-=NUMERATOR/DENOMINATOR;
+      THETA_CONV(ITER)=THETA_EST;
+      ITER+=1;
+    endwhile
+    if (ITER<=MAX_ITER)
+      THETA_CONV(ITER:MAX_ITER)=[];
+    endif
+  endfunction
+#+END_SRC
+*** Estimación por minimización del error cuadrático
+#+NAME: nr-lsqr-fit-function
+#+BEGIN_SRC octave :exports none :tangle ../octave/statistics/nr_lsqr_fit.m :padline no
+  function [THETA_EST ITER THETA_CONV]=nr_lsqr_fit(DATA,MODEL,THETA_INI,TOL=1e-3,MAX_ITER=20,H=0.001)
+    ## usage: [THETA_EST ITER THETA_CONV]=nr_lsqr_fit(DATA,MODEL,THETA_INI,MAX_ITER,TOL=1e-3,H=0.001)
+    ## Author: Javier Eduardo Diaz Zamboni <javierdiaz@bioingenieria.edu.ar>
+    ## Version: 0.1
+    ## Keywords: least square, optimization
+    ITER=1;
+    THETA_EST=THETA_INI;
+    THETA_CONV=zeros(MAX_ITER,1);
+    THETA_AUX=inf;
+    while((ITER<=MAX_ITER)&&(abs(THETA_EST-THETA_AUX)>TOL))
+      THETA_AUX=THETA_EST;
+      DIFF_AUX=DATA(:)-MODEL(THETA_AUX)(:);
+      DEV1_MODEL=dfx(MODEL,THETA_AUX,1,H);
+      DEV1_MODEL_SQR=DEV1_MODEL.^2;
+      DEV2_MODEL=df2x2(MODEL,THETA_AUX,1,H);
+      NUMERATOR =sum((DIFF_AUX(:).*DEV1_MODEL(:))(:));
+      DENOMINATOR = sum(((DIFF_AUX(:).*DEV2_MODEL(:))-(DEV1_MODEL_SQR(:)))(:));
+      THETA_EST-=NUMERATOR/DENOMINATOR;
+      THETA_CONV(ITER)=THETA_EST;
+      ITER+=1;
+    endwhile
+    if (ITER<=MAX_ITER)
+      THETA_CONV(ITER:MAX_ITER)=[];
+    endif
+  endfunction
+#+END_SRC
+
+*** Ajuste de PSF permite seleccionar entre los tres anteriores
+#+NAME: fit_psf_function
+#+BEGIN_SRC octave :results none :exports none :tangle ../octave/statistics/fit_psf.m :noweb yes :padline no
+  function [THETA_EST ITERS THETA_CONV TIME]=fit_psf(DATA,MODEL,THETA_INI,METHOD,TOL=1e-3,MAX_ITER=20,H=0.001)
+    <<octave-license-dz>>
+    ## usage: [THETA_EST ITERS THETA_CONV TIME]=fit_psf(DATA,MODEL,THETA_INI,METHOD,TOL=1e-3,MAX_ITER=20,H=0.001)
+    ## MODEL is a function handle 
+    ## METHOD could be "midiv" "ml" or "lsqr" string
+    ## DATA must be correctly normalized for each METHOD, and MODEL must be normalized in the same way
+    # Author: Javier Eduardo Diaz Zamboni <javierdiaz@bioingenieria.edu.ar>
+    # This a generic function that allows to select a method to fit a PSF.
+    # Version: 0.1
+    # Keywords: i-divergence, maximum likelihood, least square optimization
+    switch METHOD
+      case {"midiv" "MIDIV"}
+        tic;
+        [THETA_EST ITERS THETA_CONV]=nr_idiv_fit(DATA,MODEL,THETA_INI,TOL,MAX_ITER,H);
+        TIME=toc;
+      case {"ml" "ML"}
+        tic;
+        [THETA_EST ITERS THETA_CONV]=nr_poiss_ml_fit(DATA,MODEL,THETA_INI,TOL,MAX_ITER,H);
+        TIME=toc;           
+      case {"lsqr" "LSQR"}
+        tic;
+        [THETA_EST ITERS THETA_CONV]=nr_lsqr_fit(DATA,MODEL,THETA_INI,TOL,MAX_ITER,H);
+        TIME=toc;
+    endswitch
+  endfunction
+#+END_SRC
+
+**** Es posible ajustar el parámetro de posición a partir de una imagen? :noexport:
+#+BEGIN_SRC octave :results none :exports none :tangle ../octave/statistics/prueba_fit_psf_from_image_data.m :noweb yes :padline no
+  addpath(genpath("../../octave"))
+  graphics_toolkit("gnuplot");
+  <<gl-model-setup>>
+  m.n_col=1;
+  m.n_row=1;
+  m.n_lay=31;
+  m.pixel_size=9;
+  peak_shift=0;
+  t_s=5;
+  m.image_formation = @(T_S,NORM)generate_image_stack(@(XX,YY,ZZ)m.gl_psf_punctual(XX,YY,ZZ,T_S),...
+                                                      m.pixel_size,m.pixel_size,m.delta_z,...
+                                                      m.n_col,m.n_row,m.n_lay,NORM,peak_shift);
+  psf=m.image_formation(t_s,"sum");
+  data=zeros(1,1,128);
+  data(1,1,10:27)=1;
+  data(1,1,50:67)=1;
+  data(1,1,90:107)=1;
+  data=100*data;
+  data_b=stationary_imaging(data,psf);
+  data_n=poissrnd(data_b);
+  subplot(4,1,1)
+  plot(100*squeeze(psf));
+  subplot(4,1,2)
+  plot(squeeze(data));
+  subplot(4,1,3)
+  plot(squeeze(data_b));
+  subplot(4,1,4)
+  plot(squeeze(data_n));
+
+  data_model=@(T_S)stationary_imaging(data,m.image_formation(T_S,"sum"));
+  n_samples=30;
+  t_s_ini=unifrnd(4.75,5.25,10,1);
+  t_s_estimated=zeros(n_samples,length(t_s_ini));
+  for n=1:n_samples
+    data_n=poissrnd(data_b);
+    for t=1:length(t_s_ini)
+      [THETA_EST ITERS THETA_CONV TIME]=fit_psf(data_n,data_model,t_s_ini(t),"ML");
+      disp(strcat(num2str(t),"\t",num2str(n),"\t",num2str(THETA_EST),"\t", num2str(ITERS)))
+      t_s_estimated(n,t)=THETA_EST;
+    endfor
+  
+  endfor
+#+END_SRC
+
+** Cota inferior de Cramér-Rao 
+
+#+NAME: fisher_information_function
+#+BEGIN_SRC octave :exports none :tangle ../octave/statistics/fisher_information.m :noweb yes :padline no
+  function FI=fisher_information(PROB,THETA)
+    <<octave-license-dz>>
+    ## usage: FI=fisher_information(PROB,THETA)
+    ## Author: Javier Eduardo Diaz Zamboni <javierdiaz@bioingenieria.edu.ar>
+    ## Version: 0.2
+    ## Keywords: Fisher information
+    log_prob_deriv2=@(theta)df2x2(@(theta2)log(PROB(theta2)),theta,0);
+    FI=-1.0*sum(log_prob_deriv2(THETA)(:).*PROB(THETA)(:));
+  endfunction
+#+END_SRC
+
+The following function is deprecated.
+
+#+NAME: cramer_rao_bound_for_poisson_function
+#+BEGIN_SRC octave :exports none :noweb yes :padline no :tangle ../octave/statistics/cr_bound_poisson.m
+function CRLB=cr_bound_poisson(MODEL,THETA)
+      <<octave-license-dz>>
+      ## usage: CRB=crlb_poisson(MODEL,THETA)
+      ## Author: Javier Eduardo Diaz Zamboni <javierdiaz@bioingenieria.edu.ar>
+      ## Version: 0.2
+      ## Keywords: Cramer Rao Lower Bound (variance) for poisson distrubuited data 
+      CRLB=crlb_poisson(MODEL,THETA);
+  endfunction
+#+END_SRC
+
+
+This is the new function to evaluate the Cramér-Rao lower bound for poisson data.
+
+#+NAME: cramer_rao_bound_for_poisson_function
+#+BEGIN_SRC octave :exports none :noweb yes :padline no :tangle ../octave/statistics/crlb_poisson.m
+function CRLB=crlb_poisson(MODEL,THETA)
+      <<octave-license-dz>>
+      ## usage: CRB=crlb_poisson(MODEL,THETA)
+      ## Author: Javier Eduardo Diaz Zamboni <javierdiaz@bioingenieria.edu.ar>
+      ## Version: 0.1
+      ## Keywords: Cramer Rao Lower Bound (variance) for poisson distributed data 
+      deriv_sq=dfx(MODEL,THETA,0,1e-10).^2;
+      CRLB=1/sum(deriv_sq(:)./MODEL(THETA)(:));
+  endfunction
+#+END_SRC
+
+#+NAME: test_cr_bound
+#+BEGIN_SRC octave :results output :exports none :noweb yes :padline no
+  <<octave-license-dz>>
+  clear all;  more off;
+  <<gl-model-setup>>
+  m.n_col=19;
+  m.n_row=19;
+  peak_shift=-1;
+  t_s=5;
+  photons_at_plane=2.^[8 10 12 14 16]; 
+  background=0;
+  sd_ro_noise=0;
+  for k=1:1
+    m.n_lay=k;
+    m.image_formation = @(T_S,NORM)generate_image_stack(@(XX,YY,ZZ)m.gl_psf_punctual(XX,YY,ZZ,T_S),...
+                                                        m.pixel_size,m.pixel_size,m.delta_z,...
+                                                        m.n_col,m.n_row,m.n_lay,NORM,peak_shift);
+    for j=1:length(photons_at_plane)  
+      disp(strcat("AGUET:\t",num2str(sqrt(1/cr_bound_poisson(@(T_S)m.image_formation(T_S,"none")*photons_at_plane(j)+background+sd_ro_noise^2,t_s)))))
+          ##var_crb(pap_counter,1)=1/fisher_information(@(T_S)convert_to_pmf(@(PARAM)m.image_formation(PARAM,"none")*test.photons_at_plane(pap_counter),T_S),test.t_s);
+	  ##disp(strcat("FISHER:\t",num2str(sqrt(1/fisher_information(@(T_S)m.image_formation(T_S,"none")*photons_at_plane(j)+background+sd_ro_noise^2,t_s)))))
+      disp(strcat("FISHER:\t",num2str(sqrt(1/(fisher_information(@(T_S)convert_to_pmf(@(PARAM)m.image_formation(PARAM,"none")*photons_at_plane(j)+background+sd_ro_noise^2,T_S),t_s))))))
+    endfor
+  endfor
+
+  m.n_col=1;
+  m.n_row=19;
+  m.n_lay=45;
+  peak_shift=0;
+  t_s=5;
+  background=0;
+  sd_ro_noise=0;
+  m.image_formation = @(T_S,NORM)generate_image_stack(@(XX,YY,ZZ)m.gl_psf_punctual(XX,YY,ZZ,T_S),...
+                                                        m.pixel_size,m.pixel_size,m.delta_z,...
+                                                        m.n_col,m.n_row,m.n_lay,NORM,peak_shift);
+for j=1:length(photons_at_plane) 
+    disp(strcat("AGUET sagittal cut:\t",num2str(sqrt(1/cr_bound_poisson(@(T_S)m.image_formation(T_S,"none")*photons_at_plane(j)+background+sd_ro_noise^2,t_s)))))
+    disp(strcat("FISHER for sagittal cut:\t",num2str(sqrt(1/fisher_information(@(T_S)m.image_formation(T_S,"none")*photons_at_plane(j)+background+sd_ro_noise^2,t_s)))))
+endfor
+
+ #+END_SRC
+   
+#+RESULTS: test_cr_bound
+#+begin_example
+AGUET:	0.17082
+FISHER:	5.1117
+AGUET:	0.085408
+FISHER:	5.1117
+AGUET:	0.042704
+FISHER:	5.1117
+AGUET:	0.021352
+FISHER:	5.1117
+AGUET:	0.010676
+FISHER:	5.1117
+AGUET sagittal cut:	0.033048
+FISHER for sagittal cut:	0.042762
+AGUET sagittal cut:	0.016524
+FISHER for sagittal cut:	0.021381
+AGUET sagittal cut:	0.008262
+FISHER for sagittal cut:	0.01069
+AGUET sagittal cut:	0.004131
+FISHER for sagittal cut:	0.0053452
+AGUET sagittal cut:	0.0020655
+FISHER for sagittal cut:	0.0026726
+#+end_example
+
+** Estimador de Bootstrap no paramétrico
+#+NAME: nonparametric_bootstrap_statistic_function
+#+BEGIN_SRC octave :exports none :tangle ../octave/statistics/nonparametric_bootstrap_statistics.m
+  function [THETA SE CI]=nonparametric_bootstrap_statistics(DATA,STATISTIC,B,ALPHA)
+    ## usage: [THETA SE CI]=nonparametric_bootstrap_statistics(DATA,STATISTIC,B,ALPHA)
+    narginchk(4,4)
+
+    THETA=STATISTIC(DATA);
+    data_dim=size(DATA);
+    sample_number=length(DATA);
+    theta_boot=zeros(B,1);
+    se_aux=zeros(B,1);
+    ## sampling with replacement
+    for b=1:B
+      data_boot=DATA(unidrnd(sample_number,data_dim));
+      theta_boot(b)=STATISTIC(data_boot);     
+      se_aux(b)=(theta_boot(b)-THETA).^2;
+    endfor
+    CI=quantile(theta_boot,[ALPHA 1-ALPHA])';
+    SE=sqrt(mean(se_aux));
+
+  endfunction
+
+#+END_SRC
+   
+#+NAME: nonparametric_bootstrap_statistic_function_test
+#+BEGIN_SRC octave :results output :exports none
+  N=10;
+  B=10000;
+  alpha=0.05;
+  mu=5;
+  sigma=2;
+  x=normrnd(mu,sigma,N,1);
+  disp("--------------------")
+  disp("Results for mean")
+  [MEAN SE CI]=nonparametric_bootstrap_statistics(x,@mean,B,alpha)
+  disp("--------------------")
+  disp("Results for std")
+  [STD SE CI]=nonparametric_bootstrap_statistics(x,@std,B,alpha)
+#+END_SRC
+
+#+RESULTS: nonparametric_bootstrap_statistic_function_test
+#+begin_example
+--------------------
+Results for mean
+MEAN =  4.7890
+SE =  0.60376
+CI =
+
+   3.7397   5.7260
+
+--------------------
+Results for std
+STD =  2.0359
+SE =  0.35837
+CI =
+
+   1.3266   2.3959
+
+
+#+end_example
+

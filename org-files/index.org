@@ -1,0 +1,101 @@
+﻿#+STARTUP:  align fold nodlcheck showstars oddeven lognotestate hideblocks
+
+#+SETUPFILE: theme-bigblow-deptoinformatica.setup
+
+#+SUBTITLE: 
+#+AUTHOR: 
+#+EMAIL: jdiaz at ingenieria dot uner dot edu dot ar 
+#+CREATOR: Javier Eduardo Diaz Zamboni
+ 
+* Acerca de este repositorio 
+** Resumen
+   En repositorio almacena herramientas de software desarrolladas en varios lenguajes. Estas están orientadas a aplicaciones de adquisición, análisis, procesamiento, visualización y gestión de imágenes con principal aplicación en microscopia.
+** Organización del repositorio
+   El repositorio se organiza de la siguiente manera. En la carpeta org-files residen archivos de texto en formato org-mode que contienen documentación y código. El código se extrae de estos archivos y son puestos en carpetas con el nombre de cada lenguaje de programación.
+   
+   El repositorio está bajo el sistema de control de versiones svn y puede descargarse libremente desde [[http://deptoinformatica.fi.uner.edu.ar:80/svn/lamae_lib]].
+
+** Convención para nombres                                         :noexport:
+- Utilizar inglés para nombrar archivos, carpetas, código y comentarios dentro del código.
+- Elegir nombres de variables que indiquen su propósito.
+** Consejos generales :noexport:
+- Introducir correctamente el encabezado en cada bloque de código fuente en los archivos org-mode.
+- Sólo utilizar numeración en la exportación de código en caso de ser necesario para la documentación.
+- Revisar la versión semántica de cada archivo tangleado.
+- Generar código de pruebas. Unidades de testeo.
+*** GNU Octave
+    Para codificación en GNU Octave guiarse por los consejos y estándares del Apéndice C de la [[https://www.gnu.org/software/octave/octave.pdf][Documentación]] de GNU Octave.
+**** Consejos para control de pares parámetros/valor.
+     Es común encontrarse desarrollando funciones con un número de parámetros variable y/o bien podría suceder también que la función tenga un número grande de parámetros. Algunos parámetros podrían tomar valores por defecto, pero es mucho más funcional que el usuario cambiar estos valores. Se utilizó el código publicado en [[http://stackoverflow.com/questions/2775263/how-to-deal-with-name-value-pairs-of-function-arguments-in-matlab][stackoverflow]] para matlab (mínimamente modificado), el cual presenta de forma organizada como seguir una estrategia para tratar con pares parámetros/valor que se pasan como argumentos a una función. Se agrega a esta lógica la posibilidad de pasar un struct con las opciones de la función y se controla si los valores pasados como parámetros corresponden a las optiones de la función. 
+     
+#+BEGIN_SRC octave :exports code :tangle ../octave/miscellaneous/test_function.m 
+  function [retval] = test_function(varargin)
+    options = struct("firstparameter",3.0,"secondparameter",[1 3]);
+    if (nargin==1)
+      options=test_function_options(options,varargin{1});
+    else 
+      aux_cell=varargin;
+##{1:nargin}
+      options=test_function_options(options,aux_cell);
+    endif
+    retval=options.secondparameter;
+  endfunction
+#+END_SRC     
+ La función test_function_options analiza los nombres de los parámetros y asigna los valores pasados como parámetros. Esta función no controla los valores.
+#+BEGIN_SRC octave :exports none :tangle ../octave/miscellaneous/test_function_options.m
+function OPTIONS = test_function_options(DEFAULT_OPTIONS,INPUT_OPTIONS)
+    # usage: OPTIONS = test_function_options(DEFAULT_OPTIONS,INPUT_OPTIONS)
+    OPTIONS=DEFAULT_OPTIONS;
+    optionNames = fieldnames(OPTIONS);
+    if isstruct(INPUT_OPTIONS)
+      input_optionNames = fieldnames(INPUT_OPTIONS); 
+      for j=1:length(input_optionNames)
+        if (isfield(DEFAULT_OPTIONS, lower(input_optionNames{j}))) # make case insensitive
+          ## overwrite options. If you want you can test for the right class here
+          ## Also, if you find out that there is an option you keep getting wrong,
+          ## you can use "if strcmp(inpName,'problemOption'),testMore,end"-statements
+          OPTIONS=setfield(OPTIONS,lower(input_optionNames{j}),getfield(INPUT_OPTIONS,input_optionNames{j}));
+        else
+          error("%s is not a recognized parameter name",input_optionNames{j})
+        endif
+      endfor
+    else 
+      if(iscell(INPUT_OPTIONS))      
+        for pair = reshape(INPUT_OPTIONS,2,[]) # pair is {propName;propValue}
+          inpName = lower(pair{1}); # make case insensitive
+          if any(strcmp(inpName,optionNames))
+            ## overwrite options. If you want you can test for the right class here
+            ## Also, if you find out that there is an option you keep getting wrong,
+            ## you can use "if strcmp(inpName,'problemOption'),testMore,end"-statements
+            OPTIONS.(inpName) = pair{2};
+          else
+            error("%s is not a recognized parameter name",inpName)
+          endif
+        endfor
+      else
+        error("EXAMPLE needs a comma separated list or struct with propertyName/propertyValue pairs")
+      endif
+    endif
+  endfunction
+#+END_SRC
+#+BEGIN_SRC octave :exports none :results output
+test_function("firstparameter",4,"secondparameter",[15 3])
+s=struct("firstparameter",4,"secondparameter",[10 3]);
+test_function(s)
+#+END_SRC
+
+#+RESULTS:
+
+** Ciclo de trabajo :noexport:
+*** Análisis
+*** Codificación y documentación
+    Para la codificación utilizamos org-mode y babel.
+*** Pruebas
+*** Refactorización
+*** Publicación
+* Documentación
+  #+INCLUDE: statistics.org :minlevel 2
+  #+INCLUDE: image-processing.org :minlevel 2
+  #+INCLUDE: image-analysis.org :minlevel 2
+  #+INCLUDE: miscellaneous.org :minlevel 2
+

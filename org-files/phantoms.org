@@ -1,0 +1,283 @@
+#+STARTUP:    align fold nodlcheck showstars oddeven lognotestate hideblocks m
+#+OPTIONS:  H:5 num:t \n:nil @:t ::t |:t ^:{} -:t f:t *:t LaTeX:t skip:nil d:(HIDE) toc:nil date:nil author:nil
+#+SEQ_TODO:   TODO(t) INPROGRESS(i) WAITING(w@) | DONE(d) CANCELED(c@)
+#+TAGS:       Write(w) Update(u) Fix(f) Check(c) 
+#+LANGUAGE:   en
+#+HTML_HEAD: <link rel="styles" type="text/css" href="default.css" />
+#+EXPORT_SELECT_TAGS: export
+#+EXPORT_EXCLUDE_TAGS: noexport
+#+CREATOR: Javier Eduardo Diaz Zamboni     
+
+
+
+#+TITLE: Fantomitas
+
+* Cubo de intensidad
+#+NAME: intensity_cube
+#+begin_src octave :tangle ../octave/miscellaneous/intensity_cube.m :noweb yes :padline no
+  function C=intensity_cube(size_a=128,size_c=64,intensity=255)
+    <<octave-license-dz>>
+    ## usage: C=intensity_cube(SIZE_A,SIZE_C,INTENSITY)
+    ##
+    ## Returns a three-dimensional array of size SIZE_A*SIZE_A*SIZE_A
+    ## with a centered cube of size SIZE_C*SIZE_C*SIZE_C with uniform INTENSITY.
+    ## Example:
+    ##  cub=intensity_cube(10,4,20);
+    ##  cub(:,:,1)
+    ##  cub(:,:,5)
+    ##
+    ## Author: Diaz-Zamboni Javier Eduardo
+    ## Created: 2012/08/22
+    ## Version: 0.1
+    ##
+    C=0;
+    if ((size_a<0) && (size_c<0) && (intensity<0))
+      usage ("all arguments must be positive");
+    else
+      if (size_a<size_c)
+        usage(" 'SIZE_C' argument must be less or equal than SIZE_A");
+      endif
+      C=zeros(size_a,size_a,size_a);
+      aux=intensity*ones(size_c,size_c,size_c);
+      beg_aux=fix((size_a-size_c)/2)+1;
+      end_aux=beg_aux+size_c-1;
+      C(beg_aux:end_aux,beg_aux:end_aux,beg_aux:end_aux)=aux;
+    endif
+
+  endfunction
+
+#+end_src
+#+NAME:intensity-cube-test
+#+begin_src octave :output none :exports none :tangle ../octave/miscellaneous/intensity_cube_test.m
+  img=intensity_cube;
+  graphics_toolkit("gnuplot");
+  imagesc(squeeze(img(:,:,64)));
+  print("-dpng","cubo.png"); 
+#+end_src
+
+#+RESULTS:
+  [[file:cubo.png]]
+
+* Disco de intensidad
+#+NAME: intensity-disk
+#+BEGIN_SRC octave :exports none :tangle ../octave/miscellaneous/intensity_disk.m :padline no
+  function ID=intensity_disk(N)
+    ## usage: ID=intensity_disk(N) 
+    ## N size of the image
+    ## Returns 
+    ## Author: Diaz-Zamboni Javier Eduardo
+    ## Created: 2017/04/27
+    ## Version: 0.1
+    if (N>0)
+      ID=zeros(N);
+      X=linspace(-0.5,0.5,N);
+      for i=1:N
+	for j=1:N
+          if (sqrt(X(i)^2+X(j)^2)<=0.5)
+            ID(i,j)=1; 
+	  endif
+	endfor
+      endfor
+    else
+      ID=-1;
+    endif
+  endfunction
+#+END_SRC
+
+#+NAME: intensity-disk-test
+#+BEGIN_SRC octave :exports none :tangle ../octave/miscellaneous/intensity_disk_test.m
+  img=intensity_disk(129);
+  graphics_toolkit("gnuplot");
+  imshow(img);
+#+END_SRC
+
+* Patrón de líneas
+#+NAME: line-pattern
+#+BEGIN_SRC octave :exports none :tangle ../octave/miscellaneous/line_pattern.m :padline no
+  function LP=line_pattern(SIZE,ORIENTATION="horizontal")
+    ## usage: LP=line_pattern(SIZE,ORIENTATION) 
+    ## Author: Diaz-Zamboni Javier Eduardo
+    ## Created: 2017/05/17
+    ## Version: 0.1
+    if (length(SIZE)==2)
+     switch lower(ORIENTATION)
+     case {"horizontal"}
+      LP=zeros(SIZE);
+      s=2;
+      j=2;
+      while (j<=SIZE(2)-s)
+       LP(:,j)=1;
+       j+=s;
+       LP(:,j)=1;
+       s+=1;
+       j+=s;
+      endwhile
+     case {"vertical"}
+      LP=zeros(SIZE);
+      s=2;
+      j=2;
+      while (j<=SIZE(1)-s)
+       LP(j,:)=1;
+       j+=s;
+       LP(j,:)=1;
+       s+=1;
+       j+=s;
+      endwhile
+     otherwise
+     error("%s is not a valid orientation",ORIENTATION);
+     endswitch
+    else
+      error("SIZE must be a vector of size two");
+    endif
+  endfunction
+#+END_SRC
+
+#+NAME: line-pattern-test
+#+BEGIN_SRC octave :exports none :tangle ../octave/miscellaneous/line_pattern_test.m
+  img1=line_pattern([10 64],"horizontal");
+  img2=line_pattern([ 64 10],"vertical");
+  graphics_toolkit("gnuplot");
+  subplot(1,2,1)
+  imagesc(img1);
+  subplot(1,2,2)
+  imagesc(img2);
+  colormap(parula);
+#+END_SRC
+
+* Anillo de intensidad 
+#+NAME: intensity-ring
+#+BEGIN_SRC octave :exports none :tangle ../octave/miscellaneous/intensity_ring.m :padline no
+  function IR=intensity_ring(NE,NI)
+    ## usage: ID=intensity_ring(NE,NI) 
+    ## NE is the external diameter. It is size of the final square image array.
+    ## NI is the internal diameter. 
+    ## Returns 
+    ## Author: Diaz-Zamboni Javier Eduardo
+    ## Created: 2017/04/27
+    ## Version: 0.1
+    if (NE>NI)
+      internal_disk=intensity_disk(NI);
+      IR=intensity_disk(NE);
+      if (mod(NI,2)==0)
+	index_from=fix(NE/2)-fix(NI/2)+1;
+      else
+	index_from=fix(NE/2)-fix(NI/2);
+      endif
+      index_to=fix(NE/2)+fix(NI/2);
+      IR(index_from:index_to,index_from:index_to)-=internal_disk;
+    else
+      error("NE must be greater than NI");
+    endif
+  endfunction
+#+END_SRC
+
+#+NAME: intensity-ring-test
+#+BEGIN_SRC octave :exports none :tangle ../octave/miscellaneous/intensity_ring_test.m
+  DE=128;
+  DI=65;
+  img=intensity_ring(DE,DI);
+  graphics_toolkit("gnuplot");
+  imagesc(img);
+#+END_SRC
+
+* Esfera de intensidad
+#+NAME: intensity-sphere
+#+BEGIN_SRC octave :exports none :tangle ../octave/miscellaneous/intensity_sphere.m :padline no
+  function IS=intensity_sphere(N)
+    ## usage: ID=intensity_sphere(N) 
+    ## N size of the image
+    ## Returns 
+    ## Author: Diaz-Zamboni Javier Eduardo
+    ## Created: 2017/04/27
+    ## Version: 0.1
+    if (N>0)
+      IS=zeros(N,N,N);
+      X=linspace(-0.5,0.5,N);
+      for k=1:N
+	for i=1:N
+	  for j=1:N
+            if (sqrt(X(i)^2+X(j)^2+X(k)^2)<=0.5)
+              IS(i,j,k)=1; 
+	    endif
+	   endfor
+	endfor
+      endfor
+    else
+      IS=-1;
+    endif
+  endfunction
+
+  
+#+END_SRC
+
+#+NAME: intensity-disk-test
+#+BEGIN_SRC octave :exports none :tangle ../octave/miscellaneous/intensity_sphere_test.m
+  N=64;
+  img=intensity_sphere(N);
+  graphics_toolkit("gnuplot");
+  subplot(2,2,1)
+  imagesc(squeeze(img(:,:,fix(N/2))));
+  subplot(2,2,2)
+  imagesc(squeeze(img(fix(N/2),:,:)));
+  subplot(2,2,3)
+  imagesc(squeeze(img(:,fix(N/2),:)));
+#+END_SRC
+
+* Esfera hueca
+#+NAME: hollow-sphere
+#+BEGIN_SRC octave :exports none :tangle ../octave/miscellaneous/hollow_sphere.m :padline no
+  function HS=hollow_sphere(NE,NI)
+    ## usage: hollow_sphere(NE,NI) 
+    ## NE is the external diameter. It is the final size of the 3D array.
+    ## NI is de internal diameter.
+    ## Returns 
+    ## Author: Diaz-Zamboni Javier Eduardo
+    ## Created: 2017/04/27
+    ## Version: 0.1
+    if (NE>NI)
+      internal_sphere=intensity_sphere(NI);
+      HS=intensity_sphere(NE);
+      index_from=fix(NE/2)-fix(NI/2)+1;
+      index_to=fix(NE/2)+fix(NI/2);
+      HS(index_from:index_to,index_from:index_to,index_from:index_to)-=internal_sphere;
+    else
+      HS=-1;
+    endif
+  endfunction
+
+#+END_SRC
+
+#+NAME: hollow-sphere-test
+#+BEGIN_SRC octave :exports none :tangle ../octave/miscellaneous/hollow_sphere_test.m
+  NE=128;
+  img=hollow_sphere(NE,fix(NE/2));
+  graphics_toolkit("gnuplot");
+  subplot(2,2,1)
+  imagesc(squeeze(img(:,:,fix(NE/2))));
+  subplot(2,2,2)
+  imagesc(squeeze(img(fix(NE/2),:,:)));
+  subplot(2,2,3)
+  imagesc(squeeze(img(:,fix(NE/2),:)));
+#  print("-dpng","cubo.png"); 
+#+END_SRC
+
+* Licencia
+#+NAME: octave-license-dz
+#+begin_src octave
+  ##  Copyright (C)  2015 Javier Eduardo Diaz Zamboni
+  ##
+  ##  This program is free software: you can redistribute it and/or modify
+  ##  it under the terms of the GNU General Public License as published by
+  ##  the Free Software Foundation, either version 3 of the License, or
+  ##  (at your option) any later version.
+  ##
+  ##  This program is distributed in the hope that it will be useful,
+  ##  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  ##  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  ##  GNU General Public License for more details.
+  ##
+  ##  You should have received a copy of the GNU General Public License
+  ##  along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+#+end_src
+   
